@@ -209,17 +209,29 @@ export const rideService = {
     return data as Record<string, unknown> | null;
   },
 
-  subscribeToRide(rideId: string, onUpdate: (payload: any) => void) {
+  subscribeToRide(
+    rideId: string,
+    onUpdate: (payload: unknown) => void,
+    opts?: { scope?: string },
+  ) {
+    if (!isSupabaseConfigured || !rideId?.trim()) return () => {};
+
+    const scope = opts?.scope ?? 'default';
+    const channelName = `ride-updates:${rideId}:${scope}`;
+
     const channel = supabase
-      .channel(`ride-${rideId}`)
+      .channel(channelName)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'rides', filter: `id=eq.${rideId}` },
         (payload) => onUpdate(payload.new),
-      )
-      .subscribe();
+      );
 
-    return () => { supabase.removeChannel(channel); };
+    channel.subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
   },
 
   async getCompletedRidesCount(userId: string): Promise<number> {
@@ -288,16 +300,31 @@ export const rideService = {
     if (error) console.error('[shared_rides] mark_read error:', error);
   },
 
-  async getSharedRideLiveDetails(rideShareId: string) {
-    if (!isSupabaseConfigured) return null;
-    const { data, error } = await supabase.rpc('get_shared_ride_live_details', {
-      p_ride_share_id: rideShareId,
+  /**
+   * Detalhe inicial da viagem partilhada — RPC `obter_detalhe_viagem_partilhada(p_share_id)`.
+   * Devolve `screen_mode` (live_tracking | history_details | …).
+   */
+  async getSharedRideDetail(shareId: string) {
+    const { fetchSharedRideDetail } = await import('@/services/sharedRideDetailService');
+    return fetchSharedRideDetail(shareId);
+  },
+
+  /**
+   * Actualização em tempo real — RPC `obter_corrida_partilhada(p_ride_id)`.
+   * Usar apenas em `live_tracking`.
+   */
+  async getSharedRideLiveDetails(rideId: string) {
+    if (!isSupabaseConfigured || !rideId?.trim()) return null;
+    const { data, error } = await supabase.rpc('obter_corrida_partilhada', {
+      p_ride_id: rideId.trim(),
     });
     if (error) {
-      console.error('[shared_rides] get_live_details error:', error);
+      console.error('[shared_rides] obter_corrida_partilhada error:', error);
       return null;
     }
-    return data;
+    let result = data;
+    if (Array.isArray(data) && data.length > 0) result = data[0];
+    return result as { ride?: Record<string, unknown>; route?: Record<string, unknown> | null } | null;
   },
 
   async getLiveRoute(rideId: string): Promise<LiveRoute | null> {
@@ -315,8 +342,15 @@ export const rideService = {
     }
   },
 
-  subscribeToLiveRoute(rideId: string, callback: (route: LiveRoute | null) => void) {
+  subscribeToLiveRoute(
+    rideId: string,
+    callback: (route: LiveRoute | null) => void,
+    opts?: { scope?: string },
+  ) {
     if (!isSupabaseConfigured || !rideId) return () => {};
+
+    const scope = opts?.scope ?? 'default';
+    const channelName = `live-route:${rideId}:${scope}`;
 
     let lastSent = '';
     let queued: LiveRoute | null | undefined;
@@ -339,7 +373,7 @@ export const rideService = {
     };
 
     const channel = supabase
-      .channel(`live_route_${rideId}`)
+      .channel(channelName)
       .on(
         'postgres_changes',
         {
@@ -355,12 +389,13 @@ export const rideService = {
           if (timer != null) return;
           timer = setTimeout(deliver, 300);
         },
-      )
-      .subscribe();
+      );
+
+    channel.subscribe();
 
     return () => {
       if (timer != null) clearTimeout(timer);
-      supabase.removeChannel(channel);
+      void supabase.removeChannel(channel);
     };
   },
 

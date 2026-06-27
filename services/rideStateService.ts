@@ -8,6 +8,8 @@ export interface RideState {
   dropoff_address?: string;
   price_estimate?: number;
   final_fare?: number;
+  /** auth.users.id do motorista (para RPCs que exigem user_id, não driver_id de negócio). */
+  driver_user_id?: string;
   driver_id?: string;
   driver_name?: string;
   driver_phone?: string;
@@ -24,6 +26,8 @@ export interface RideState {
 
 export interface DriverInfo {
   driver_id: string;
+  /** auth.users.id do motorista (chamadas / realtime com user_id). */
+  user_id?: string;
   full_name?: string;
   phone?: string;
   avatar_url?: string;
@@ -60,6 +64,12 @@ export const rideStateService = {
         /** Apenas colunas oficiais `rides` — sem `fare_estimate` como substituto de `price_estimate`. */
         price_estimate: row.price_estimate,
         final_fare: row.final_fare,
+        driver_user_id:
+          row.driver_user_id ??
+          row.motorista_user_id ??
+          row.driver_uuid ??
+          row.auth_user_id ??
+          undefined,
         driver_id: row.driver_id,
         driver_name: row.driver_name,
         driver_phone: row.driver_phone,
@@ -93,6 +103,12 @@ export const rideStateService = {
 
       return {
         driver_id: row.driver_id ?? row.id ?? '',
+        user_id:
+          row.user_id ??
+          row.driver_user_id ??
+          row.auth_user_id ??
+          row.motorista_user_id ??
+          row.driver_uuid,
         full_name: row.full_name ?? row.name,
         phone: row.phone,
         avatar_url: row.avatar_url ?? row.driver_photo_url,

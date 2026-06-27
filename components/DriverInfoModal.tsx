@@ -15,6 +15,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { rideService } from '@/services/rideService';
 import { CachedRemoteImage } from '@/components/CachedRemoteImage';
+import { DriverRatingSection } from '@/components/DriverRatingSection';
 
 const FONT_BODY = Platform.select({
   ios: undefined,
@@ -23,6 +24,7 @@ const FONT_BODY = Platform.select({
 });
 
 type DriverInfoRow = {
+  driver_id?: string | null;
   driver_photo_url?: string | null;
   driver_name?: string | null;
   rating?: number | null;
@@ -56,6 +58,12 @@ function asRow(r: Record<string, unknown>): DriverInfoRow {
         ? String(r.category)
         : null;
   return {
+    driver_id:
+      r.driver_id != null
+        ? String(r.driver_id)
+        : r.id != null
+          ? String(r.id)
+          : null,
     driver_photo_url: r.driver_photo_url != null ? String(r.driver_photo_url) : null,
     driver_name: r.driver_name != null ? String(r.driver_name) : null,
     rating,
@@ -156,10 +164,12 @@ export function DriverInfoModal({
   visible,
   onClose,
   rideId,
+  driverId,
 }: {
   visible: boolean;
   onClose: () => void;
   rideId: string;
+  driverId?: string | null;
 }) {
   const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(false);
@@ -207,6 +217,7 @@ export function DriverInfoModal({
 
   const photoUri = details?.driver_photo_url?.trim() ?? '';
   const canZoom = photoUri.startsWith('http');
+  const resolvedDriverId = driverId?.trim() || details?.driver_id?.trim() || '';
 
   return (
     <>
@@ -267,16 +278,13 @@ export function DriverInfoModal({
                             cacheScope="driver-modal"
                             fallback={
                               <View style={styles.photoPlaceholder}>
-                                <Ionicons name="person" size={48} color="#CBD5E1" />
+                                <Ionicons name="person" size={40} color="#CBD5E1" />
                               </View>
                             }
                           />
                         </View>
                         {canZoom ? (
-                          <View style={styles.zoomHint}>
-                            <Ionicons name="expand-outline" size={14} color="#64748B" />
-                            <Text style={styles.zoomHintText}>Toque para ampliar</Text>
-                          </View>
+                          <Text style={styles.zoomHintText}>Toque para ampliar</Text>
                         ) : null}
                       </TouchableOpacity>
 
@@ -284,51 +292,64 @@ export function DriverInfoModal({
 
                       <View style={styles.statsRow}>
                         <View style={styles.ratingPill}>
-                          <Ionicons name="star" size={14} color="#D97706" />
+                          <Ionicons name="star" size={13} color="#D97706" />
                           <Text style={styles.ratingText}>{ratingText}</Text>
                         </View>
-                        <Text style={styles.tripsText}>• {tripsText} viagens</Text>
+                        <Text style={styles.tripsText}>{tripsText} viagens</Text>
                       </View>
                     </View>
 
+                    <DriverRatingSection
+                      rideId={rideId}
+                      driverId={resolvedDriverId}
+                      compact
+                      prompt="Como está a viagem?"
+                      submitAllowed={false}
+                    />
+
                     <View style={styles.section}>
-                      <Text style={styles.sectionTitle}>Veículo</Text>
+                      <Text style={styles.sectionTitle}>Veículo e matrícula</Text>
                       <View style={styles.vehicleCard}>
                         <View style={styles.vehicleRow}>
                           <View style={styles.vehicleCell}>
                             <Text style={styles.fieldLbl}>Marca</Text>
-                            <Text style={styles.fieldVal} numberOfLines={2}>
+                            <Text style={styles.fieldVal} numberOfLines={1}>
                               {details.vehicle_brand?.trim() || '—'}
                             </Text>
                           </View>
                           <View style={styles.vehicleCell}>
                             <Text style={styles.fieldLbl}>Modelo</Text>
-                            <Text style={styles.fieldVal} numberOfLines={2}>
+                            <Text style={styles.fieldVal} numberOfLines={1}>
                               {details.vehicle_model?.trim() || '—'}
                             </Text>
                           </View>
                         </View>
                         <View style={styles.divider} />
-                        <View style={styles.vehicleFullRow}>
-                          <Text style={styles.fieldLbl}>Cor</Text>
-                          <Text style={styles.fieldVal}>{details.vehicle_color?.trim() || '—'}</Text>
-                        </View>
-                        {details.vehicle_category?.trim() ? (
-                          <>
-                            <View style={styles.divider} />
-                            <View style={styles.vehicleFullRow}>
+                        <View style={styles.vehicleRow}>
+                          <View style={styles.vehicleCell}>
+                            <Text style={styles.fieldLbl}>Cor</Text>
+                            <Text style={styles.fieldVal} numberOfLines={1}>
+                              {details.vehicle_color?.trim() || '—'}
+                            </Text>
+                          </View>
+                          {details.vehicle_category?.trim() ? (
+                            <View style={styles.vehicleCell}>
                               <Text style={styles.fieldLbl}>Categoria</Text>
-                              <Text style={styles.fieldVal}>{details.vehicle_category.trim()}</Text>
+                              <Text style={styles.fieldVal} numberOfLines={1}>
+                                {details.vehicle_category.trim()}
+                              </Text>
                             </View>
-                          </>
-                        ) : null}
-                      </View>
-                    </View>
-
-                    <View style={styles.section}>
-                      <Text style={styles.sectionTitle}>Matrícula</Text>
-                      <View style={styles.plateCard}>
-                        <Text style={styles.plateText}>{details.vehicle_plate?.trim() || '—'}</Text>
+                          ) : (
+                            <View style={styles.vehicleCell} />
+                          )}
+                        </View>
+                        <View style={styles.divider} />
+                        <View style={styles.plateInline}>
+                          <Text style={styles.fieldLbl}>Matrícula</Text>
+                          <Text style={styles.plateTextInline}>
+                            {details.vehicle_plate?.trim() || '—'}
+                          </Text>
+                        </View>
                       </View>
                     </View>
                   </>
@@ -378,15 +399,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 22,
-    paddingTop: 22,
-    paddingBottom: 12,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#F1F5F9',
   },
   title: {
     fontFamily: FONT_BODY,
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '900',
     color: '#0F172A',
     flex: 1,
@@ -394,9 +415,9 @@ const styles = StyleSheet.create({
     letterSpacing: -0.3,
   },
   scrollContent: {
-    paddingHorizontal: 22,
-    paddingTop: 8,
-    paddingBottom: 32,
+    paddingHorizontal: 18,
+    paddingTop: 4,
+    paddingBottom: 20,
   },
   loadingBlock: {
     alignItems: 'center',
@@ -441,16 +462,16 @@ const styles = StyleSheet.create({
   },
   hero: {
     alignItems: 'center',
-    paddingTop: 12,
-    paddingBottom: 8,
+    paddingTop: 6,
+    paddingBottom: 4,
   },
   photoTouchable: {
     alignItems: 'center',
   },
   photoFrame: {
-    width: 104,
-    height: 104,
-    borderRadius: 36,
+    width: 88,
+    height: 88,
+    borderRadius: 30,
     overflow: 'hidden',
     backgroundColor: '#F8FAFC',
     borderWidth: 3,
@@ -475,43 +496,38 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '#F1F5F9',
   },
-  zoomHint: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginTop: 8,
-  },
   zoomHintText: {
     fontFamily: FONT_BODY,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '600',
     color: '#94A3B8',
+    marginTop: 4,
   },
   driverName: {
     fontFamily: FONT_BODY,
-    fontSize: 26,
+    fontSize: 21,
     fontWeight: '900',
     color: '#0F172A',
     textAlign: 'center',
-    marginTop: 16,
-    letterSpacing: -0.5,
+    marginTop: 8,
+    letterSpacing: -0.4,
   },
   statsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     flexWrap: 'wrap',
-    marginTop: 10,
-    gap: 8,
+    marginTop: 6,
+    gap: 6,
   },
   ratingPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 4,
     backgroundColor: '#FFFBEB',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#FEF3C7',
   },
@@ -528,21 +544,21 @@ const styles = StyleSheet.create({
     color: '#94A3B8',
   },
   section: {
-    marginTop: 22,
+    marginTop: 12,
   },
   sectionTitle: {
     fontFamily: FONT_BODY,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '900',
     color: '#94A3B8',
     textTransform: 'uppercase',
-    letterSpacing: 1.4,
-    marginBottom: 10,
+    letterSpacing: 1.2,
+    marginBottom: 8,
   },
   vehicleCard: {
     backgroundColor: '#F8FAFC',
-    borderRadius: 22,
-    padding: 18,
+    borderRadius: 18,
+    padding: 14,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#F1F5F9',
   },
@@ -554,44 +570,36 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
-  vehicleFullRow: {
-    gap: 6,
-  },
   divider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: '#E2E8F0',
-    marginVertical: 14,
+    marginVertical: 10,
   },
   fieldLbl: {
     fontFamily: FONT_BODY,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '800',
     color: '#94A3B8',
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginBottom: 6,
+    letterSpacing: 0.6,
+    marginBottom: 4,
   },
   fieldVal: {
     fontFamily: FONT_BODY,
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
     color: '#0F172A',
-    lineHeight: 22,
+    lineHeight: 18,
   },
-  plateCard: {
-    backgroundColor: '#0F172A',
-    borderRadius: 18,
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
+  plateInline: {
+    gap: 4,
   },
-  plateText: {
+  plateTextInline: {
     fontFamily: FONT_BODY,
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '900',
-    color: '#FFF',
-    letterSpacing: 4,
+    color: '#0F172A',
+    letterSpacing: 3,
   },
   errorBlock: {
     alignItems: 'center',

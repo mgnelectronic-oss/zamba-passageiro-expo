@@ -14,22 +14,25 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
-import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { DestinationMapPickerModal } from '@/components/DestinationMapPickerModal';
+import {
+  PickupLocationPicker,
+  type SelectedPickupLocation,
+} from '@/components/PickupLocationPicker';
 import {
   type PlacePrediction,
   resolvePredictionToDestination,
   searchPredictions,
   type SelectedDestination,
 } from '@/services/googlePlaces';
-import { reverseGeocode } from '@/services/googleGeocoding';
 import { addRecentDestination as addLocalRecent } from '@/services/recentDestinations';
-import { setSelectedDestination, setSelectedPickup } from '@/services/searchFlowStore';
+import { buildTripDraft, saveTripDraft, setSelectedDestination, setSelectedPickup } from '@/services/searchFlowStore';
 import { authService } from '@/services/authService';
 import { addressService } from '@/services/addressService';
 import { useAppBootstrap } from '@/contexts/AppBootstrapContext';
+import { usePassengerLocation } from '@/hooks/usePassengerLocation';
 import { VerificationAccountCard } from '@/components/VerificationAccountCard';
 import { getPrimedInitialRegion } from '@/services/mapLocationMemory';
 import {
@@ -154,13 +157,45 @@ export default function SearchScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { initialProfile } = useAppBootstrap();
+  const {
+    currentLocation,
+    currentAddress,
+    isLoadingLocation,
+    locationError: passengerLocationError,
+  } = usePassengerLocation();
   const [query, setQuery] = useState('');
-  const [pickup, setPickup] = useState<PickupState>(initialPickupFromMemory);
   const [predictions, setPredictions] = useState<PlacePrediction[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  const [isLocating, setIsLocating] = useState(true);
-  const [locationError, setLocationError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  /** Recolha escolhida manualmente (substitui temporariamente o GPS como pickup da viagem). */
+  const [selectedPickupLocation, setSelectedPickupLocation] =
+    useState<SelectedPickupLocation | null>(null);
+  const [pickupPickerOpen, setPickupPickerOpen] = useState(false);
+
+  /** Pickup: recolha manual > fonte única de localização > centro memorizado. */
+  const pickup = useMemo<PickupState>(() => {
+    if (selectedPickupLocation) {
+      return {
+        lat: selectedPickupLocation.latitude,
+        lng: selectedPickupLocation.longitude,
+        address: selectedPickupLocation.address,
+      };
+    }
+    if (currentLocation) {
+      return {
+        lat: currentLocation.latitude,
+        lng: currentLocation.longitude,
+        address:
+          currentAddress ??
+          `${currentLocation.latitude.toFixed(4)}, ${currentLocation.longitude.toFixed(4)}`,
+      };
+    }
+    return initialPickupFromMemory();
+  }, [selectedPickupLocation, currentLocation, currentAddress]);
+
+  const isLocating = !selectedPickupLocation && isLoadingLocation && !currentLocation;
+  const locationError =
+    selectedPickupLocation || currentLocation ? null : passengerLocationError;
   const [mapPickerOpen, setMapPickerOpen] = useState(false);
   const [historyItems, setHistoryItems] = useState<SearchHistoryEntry[]>([]);
 
@@ -185,46 +220,7 @@ export default function SearchScreen() {
   }, []);
 
   useEffect(() => {
-    let mounted = true;
-
-    async function loadCurrentLocation() {
-      try {
-        setIsLocating(true);
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') {
-          if (!mounted) return;
-          setLocationError('Permissão de localização negada.');
-          setPickup((prev) => ({ ...prev, address: 'Localização actual' }));
-          return;
-        }
-
-        const position = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
-
-        if (!mounted) return;
-        setPickup({ lat, lng, address: `${lat.toFixed(4)}, ${lng.toFixed(4)}` });
-        setIsLocating(false);
-
-        reverseGeocode(lat, lng)
-          .then((addr) => {
-            if (mounted) setPickup((prev) => ({ ...prev, address: addr }));
-          })
-          .catch(() => {});
-      } catch {
-        if (!mounted) return;
-        setLocationError('Não foi possível obter a localização actual.');
-        setPickup((prev) => ({ ...prev, address: 'Localização actual' }));
-      } finally {
-        if (mounted) setIsLocating(false);
-      }
-    }
-
-    loadCurrentLocation();
     return () => {
-      mounted = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
@@ -289,6 +285,12 @@ export default function SearchScreen() {
 
     setSelectedPickup({ lat: pickup.lat, lng: pickup.lng, address: pickupAddress });
     setSelectedDestination(destination);
+    saveTripDraft(
+      buildTripDraft({
+        pickup: { lat: pickup.lat, lng: pickup.lng, address: pickupAddress },
+        destination,
+      }),
+    );
     addLocalRecent(destination);
     void pushSearchHistory({
       place_id: destination.place_id,
@@ -375,17 +377,27 @@ export default function SearchScreen() {
             onPress={() => router.push('/verification' as any)}
           />
 
-          <View style={styles.pickupBox}>
+          <TouchableOpacity
+            style={styles.pickupBox}
+            onPress={() => setPickupPickerOpen(true)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Escolher ponto de recolha"
+          >
             <View style={styles.pickupDot} />
             <View style={styles.pickupCol}>
-              <Text style={styles.pickupKicker}>Localização actual</Text>
+              <Text style={styles.pickupKicker}>Ponto de recolha</Text>
               <Text style={styles.pickupAddr} numberOfLines={2}>
                 {pickup.address}
               </Text>
               {locationError ? <Text style={styles.locationError}>{locationError}</Text> : null}
             </View>
-            {isLocating ? <ActivityIndicator size="small" color={COLORS.blue500} /> : null}
-          </View>
+            {isLocating ? (
+              <ActivityIndicator size="small" color={COLORS.blue500} />
+            ) : (
+              <Ionicons name="chevron-down" size={16} color={COLORS.slate400} />
+            )}
+          </TouchableOpacity>
 
           <View style={styles.destBox}>
             <View style={styles.destAccent} />
@@ -533,6 +545,15 @@ export default function SearchScreen() {
           setQuery(dest.place_name || dest.address);
           applySelection(dest);
         }}
+      />
+
+      <PickupLocationPicker
+        visible={pickupPickerOpen}
+        onClose={() => setPickupPickerOpen(false)}
+        currentLocation={currentLocation}
+        currentAddress={currentAddress}
+        selectedPickupLocation={selectedPickupLocation}
+        onSelectPickupLocation={setSelectedPickupLocation}
       />
     </KeyboardAvoidingView>
   );

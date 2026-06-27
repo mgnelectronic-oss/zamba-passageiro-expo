@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { authService } from '@/services/authService';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
@@ -51,6 +52,7 @@ export default function AuthScreen() {
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [loading, setLoading] = useState(false);
@@ -213,18 +215,35 @@ export default function AuthScreen() {
         />
 
         <Text style={styles.label}>Password</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="••••••••"
-          placeholderTextColor="#9CA3AF"
-          value={password}
-          onChangeText={(t) => {
-            setPassword(t);
-            if (validationError) setValidationError(null);
-            if (signUpError) setSignUpError(null);
-          }}
-          secureTextEntry
-        />
+        <View style={styles.passwordField}>
+          <TextInput
+            style={styles.passwordInput}
+            placeholder="••••••••"
+            placeholderTextColor="#9CA3AF"
+            value={password}
+            onChangeText={(t) => {
+              setPassword(t);
+              if (validationError) setValidationError(null);
+              if (signUpError) setSignUpError(null);
+            }}
+            secureTextEntry={!showPassword}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity
+            style={styles.passwordToggle}
+            onPress={() => setShowPassword((prev) => !prev)}
+            accessibilityRole="button"
+            accessibilityLabel={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons
+              name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+              size={22}
+              color="#9CA3AF"
+            />
+          </TouchableOpacity>
+        </View>
 
         {mode === 'register' && validationError ? (
           <Text style={styles.errorBanner}>{validationError}</Text>
@@ -264,6 +283,7 @@ export default function AuthScreen() {
           style={styles.switchRow}
           onPress={() => {
             setMode(mode === 'login' ? 'register' : 'login');
+            setShowPassword(false);
             clearRegisterErrors();
           }}
         >
@@ -328,6 +348,30 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#111827',
+  },
+  passwordField: {
+    width: '100%',
+    height: 52,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#F9FAFB',
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  passwordInput: {
+    flex: 1,
+    height: '100%',
+    paddingHorizontal: 16,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  passwordToggle: {
+    width: 44,
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   errorBanner: {
     alignSelf: 'stretch',

@@ -1,7 +1,28 @@
+import { File as ExpoFile } from 'expo-file-system';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { profileCacheService } from '@/services/cache/profileCacheService';
 import { clearSessionCaches } from '@/services/cache/sessionCacheCleanup';
 import { cacheLog } from '@/services/cache/cacheService';
+
+/** Texto legível para UI a partir de erros do Supabase ou excepções desconhecidas. */
+export function formatErrorMessage(e: unknown): string {
+  if (e === null || e === undefined) return 'Erro desconhecido. Tente novamente.';
+  if (typeof e === 'string') return e;
+  if (e instanceof Error && e.message) return e.message;
+  if (typeof e === 'object') {
+    const o = e as Record<string, unknown>;
+    const msg = o.message;
+    if (typeof msg === 'string' && msg) {
+      const code = o.code;
+      const details = o.details;
+      const parts: string[] = [msg];
+      if (typeof code === 'string' && code) parts.push(`(${code})`);
+      if (typeof details === 'string' && details) parts.push(String(details));
+      return parts.join(' ');
+    }
+  }
+  return 'Erro ao enviar verificação. Tente novamente.';
+}
 
 export interface UserProfile {
   id: string;
@@ -124,12 +145,24 @@ export const authService = {
 
     const fileName = `${user.id}/${type}_${Date.now()}.jpg`;
 
-    const response = await fetch(fileUri);
-    const blob = await response.blob();
+    let arrayBuffer: ArrayBuffer;
+    try {
+      const local = new ExpoFile(fileUri);
+      arrayBuffer = await local.arrayBuffer();
+    } catch (readErr) {
+      throw new Error(
+        readErr instanceof Error
+          ? readErr.message
+          : 'Não foi possível ler a imagem. Tente capturar novamente.',
+      );
+    }
+    if (arrayBuffer.byteLength === 0) {
+      throw new Error('A imagem está vazia. Tente capturar novamente.');
+    }
 
     const { error } = await supabase.storage
       .from('passenger_documents')
-      .upload(fileName, blob, { contentType: 'image/jpeg', upsert: false });
+      .upload(fileName, arrayBuffer, { contentType: 'image/jpeg', upsert: false });
 
     if (error) throw error;
 

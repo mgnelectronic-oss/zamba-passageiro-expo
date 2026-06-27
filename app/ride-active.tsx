@@ -84,13 +84,17 @@ export default function RideActiveScreen() {
 
   useEffect(() => {
     if (!rideId) return;
-    const unsub = rideService.subscribeToRide(rideId, () => {
-      if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);
-      realtimeDebounceRef.current = setTimeout(() => {
-        realtimeDebounceRef.current = null;
-        syncStatus();
-      }, 220);
-    });
+    const unsub = rideService.subscribeToRide(
+      rideId,
+      () => {
+        if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);
+        realtimeDebounceRef.current = setTimeout(() => {
+          realtimeDebounceRef.current = null;
+          syncStatus();
+        }, 220);
+      },
+      { scope: 'ride-active-screen' },
+    );
     return () => {
       unsub();
       if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);

@@ -14,27 +14,30 @@ import {
   Platform,
   Animated,
   Easing,
-  LayoutAnimation,
-  UIManager,
   Pressable,
 } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Image } from 'expo-image';
 import { useRideState } from '@/hooks/useRideState';
+import { useDriverLiveLocationForPassenger, isDriverLiveTrackingEnabled } from '@/hooks/useDriverLiveLocationForPassenger';
+import { resolvePickupDriverMapLocation } from '@/lib/navigation/resolvePickupDriverLocation';
+import { logPassengerDriverLiveLocation } from '@/services/driverLocationService';
 import { rideService, type LiveRoute } from '@/services/rideService';
-import { authService } from '@/services/authService';
 import { mapRpcUiStateToPassengerVisual, type PassengerVisualState } from '@/lib/passengerRideVisualState';
-import { decodePolyline, downsampleRouteCoordinates } from '@/utils/polylineDecode';
-import { fitMapCamera, type LatLng } from '@/utils/mapCamera';
-import { ROUTE_POLYLINE_COLOR } from '@/lib/tripMapTheme';
 import { EmergencySosModal } from '@/components/EmergencySosModal';
 import { ShareTripModal } from '@/components/ShareTripModal';
-import { SosTripActionIcon } from '@/components/SosTripActionIcon';
 import { DriverInfoModal } from '@/components/DriverInfoModal';
+import { DriverRatingSection } from '@/components/DriverRatingSection';
+import { AnimatedSideActionButton } from '@/components/AnimatedSideActionButton';
 import { CachedRemoteImage } from '@/components/CachedRemoteImage';
+import { rideCallUserMessage } from '@/services/rideCallService';
+import { DriverCallOptionsModal } from '@/components/DriverCallOptionsModal';
+import { PassengerInternetCallPanel } from '@/components/PassengerInternetCallPanel';
+import { usePassengerOutboundInternetCall } from '@/hooks/usePassengerOutboundInternetCall';
+import { PassengerActiveRideMap } from '@/components/maps/PassengerActiveRideMap';
+import { PassengerTripTimeline } from '@/components/PassengerTripTimeline';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 
@@ -43,18 +46,6 @@ const FONT_BODY = Platform.select({
   android: 'sans-serif',
   default: undefined,
 });
-
-const MAP_STYLE_CLEAN = [
-  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
-  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
-  { featureType: 'administrative', elementType: 'labels', stylers: [{ visibility: 'off' }] },
-  { featureType: 'road.local', elementType: 'labels', stylers: [{ visibility: 'off' }] },
-  { featureType: 'road.arterial', elementType: 'labels.text.fill', stylers: [{ color: '#1A1A1A' }] },
-  { featureType: 'road.arterial', elementType: 'labels.text.stroke', stylers: [{ color: '#FFFFFF' }] },
-  { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#1A1A1A' }] },
-  { featureType: 'road.highway', elementType: 'labels.text.stroke', stylers: [{ color: '#FFFFFF' }] },
-  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
-];
 
 const EMERALD = '#10B981';
 
@@ -90,97 +81,148 @@ function formatMzn(amount: number): string {
   return `${s} MZN`;
 }
 
-const STAR_SIZE = 30;
-const STAR_GOLD = '#CA8A04';
-const STAR_MUTED = '#94A3B8';
-
-function CompletedTripStars({
-  rating,
-  onSelect,
-}: {
-  rating: number;
-  onSelect: (n: number) => void;
-}) {
-  const scales = useRef([1, 2, 3, 4, 5].map(() => new Animated.Value(1))).current;
-
-  const bump = (index: number) => {
-    Animated.sequence([
-      Animated.spring(scales[index], {
-        toValue: 1.14,
-        friction: 5,
-        tension: 280,
-        useNativeDriver: true,
-      }),
-      Animated.spring(scales[index], {
-        toValue: 1,
-        friction: 6,
-        tension: 200,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  };
-
-  return (
-    <View style={completedTripStarsStyles.row}>
-      {[1, 2, 3, 4, 5].map((s) => (
-        <Pressable
-          key={s}
-          hitSlop={10}
-          accessibilityRole="button"
-          accessibilityLabel={`${s} estrelas`}
-          onPress={() => {
-            bump(s - 1);
-            onSelect(s);
-          }}
-          style={completedTripStarsStyles.hit}
-        >
-          <Animated.View style={{ transform: [{ scale: scales[s - 1] }] }}>
-            <Ionicons
-              name={rating >= s ? 'star' : 'star-outline'}
-              size={STAR_SIZE}
-              color={rating >= s ? STAR_GOLD : STAR_MUTED}
-            />
-          </Animated.View>
-        </Pressable>
-      ))}
-    </View>
-  );
-}
-
-const completedTripStarsStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 8,
-  },
-  hit: { padding: 2 },
-});
 
 export default function CurrentRideScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { rideId } = useLocalSearchParams<{ rideId: string }>();
-  const mapRef = useRef<MapView | null>(null);
-  const [mapReady, setMapReady] = useState(false);
   const [cardHeight, setCardHeight] = useState(0);
+  const [navStripHeight, setNavStripHeight] = useState(0);
   const [liveRoute, setLiveRoute] = useState<LiveRoute | null>(null);
-  const [isTripCardCollapsed, setIsTripCardCollapsed] = useState(false);
+  const [recenterSignal, setRecenterSignal] = useState(0);
   const onTripSheetEnter = useRef(new Animated.Value(0)).current;
+  const [tripStartedAt] = useState(() => Date.now());
+  const [elapsedMin, setElapsedMin] = useState(0);
 
-  const [rating, setRating] = useState(0);
-  const [ratingComment, setRatingComment] = useState('');
-  const [isSubmittingRating, setIsSubmittingRating] = useState(false);
-  const [ratingSuccess, setRatingSuccess] = useState(false);
-  const [hasExistingRating, setHasExistingRating] = useState(false);
   const [showSosModal, setShowSosModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showDriverInfoModal, setShowDriverInfoModal] = useState(false);
+  const [callOptionsOpen, setCallOptionsOpen] = useState(false);
+
+  const outboundInternetCall = usePassengerOutboundInternetCall();
+  const {
+    visible: outboundCallVisible,
+    uiPhase: outboundCallPhase,
+    title: outboundCallTitle,
+    subtitle: outboundCallSubtitle,
+    driverName: outboundDriverName,
+    driverAvatarUrl: outboundDriverAvatarUrl,
+    durationSec: outboundDurationSec,
+    showDuration: outboundShowDuration,
+    isWaiting: outboundCallWaiting,
+    micMuted: outboundMicMuted,
+    speakerOn: outboundSpeakerOn,
+    hangupBusy: outboundHangupBusy,
+    remoteStreamUrl: outboundRemoteStreamUrl,
+    startCall: startOutboundInternetCall,
+    hangUp: hangUpOutboundInternetCall,
+    toggleMicMuted: toggleOutboundMicMuted,
+    toggleSpeaker: toggleOutboundSpeaker,
+    dismiss: dismissOutboundInternetCall,
+  } = outboundInternetCall;
 
   const { state, driverInfo, loading, uiState, isTerminal, stopPolling, refresh } = useRideState(rideId);
 
   const visual = mapRpcUiStateToPassengerVisual(uiState) as PassengerVisualState | null;
+
+  const driverLiveTrackingEnabled = isDriverLiveTrackingEnabled(visual, uiState);
+
+  const { location: driverLiveLocation } = useDriverLiveLocationForPassenger({
+    rideId,
+    driverId: state?.driver_id,
+    enabled: driverLiveTrackingEnabled && !!state?.driver_id,
+    visual,
+    uiState,
+  });
+
+  const resolvedDriverLocation = useMemo(
+    () =>
+      resolvePickupDriverMapLocation({
+        liveLocation: driverLiveLocation,
+        driverInfoLat: driverInfo?.lat,
+        driverInfoLng: driverInfo?.lng,
+        stateDriverLat: state?.driver_lat,
+        stateDriverLng: state?.driver_lng,
+        liveRouteLat: liveRoute?.last_driver_lat,
+        liveRouteLng: liveRoute?.last_driver_lng,
+      }),
+    [
+      driverLiveLocation,
+      driverInfo?.lat,
+      driverInfo?.lng,
+      state?.driver_lat,
+      state?.driver_lng,
+      liveRoute?.last_driver_lat,
+      liveRoute?.last_driver_lng,
+    ],
+  );
+
+  const lastDriverSourceRef = useRef(resolvedDriverLocation.source);
+  useEffect(() => {
+    if (!driverLiveTrackingEnabled) return;
+    if (lastDriverSourceRef.current === resolvedDriverLocation.source) return;
+    const previous = lastDriverSourceRef.current;
+    lastDriverSourceRef.current = resolvedDriverLocation.source;
+    const logFn = logPassengerDriverLiveLocation;
+    logFn('selected source changed', {
+      rideId,
+      driverId: state?.driver_id,
+      visual,
+      uiState,
+      previousSource: previous,
+      selectedSource: resolvedDriverLocation.source,
+      lat: resolvedDriverLocation.lat,
+      lng: resolvedDriverLocation.lng,
+      updatedAt: driverLiveLocation?.row.updated_at,
+      ageMs: driverLiveLocation?.ageMs,
+    });
+    if (resolvedDriverLocation.source !== 'driver_locations_current') {
+      logFn('fallback used', {
+        rideId,
+        driverId: state?.driver_id,
+        selectedSource: resolvedDriverLocation.source,
+        liveStale: driverLiveLocation?.isStale ?? null,
+        liveAvailable: driverLiveLocation?.isValid ?? false,
+      });
+    }
+  }, [
+    driverLiveTrackingEnabled,
+    resolvedDriverLocation.source,
+    resolvedDriverLocation.lat,
+    resolvedDriverLocation.lng,
+    rideId,
+    state?.driver_id,
+    visual,
+    uiState,
+    driverLiveLocation?.row.updated_at,
+    driverLiveLocation?.ageMs,
+    driverLiveLocation?.isStale,
+    driverLiveLocation?.isValid,
+  ]);
+
+  const driverLat = resolvedDriverLocation.lat;
+  const driverLng = resolvedDriverLocation.lng;
+
+  const showNavStrip =
+    visual === 'driver_assigned' || visual === 'driver_arrived' || visual === 'on_trip';
+
+  const navStripTitle =
+    visual === 'driver_arrived'
+      ? 'Motorista chegou'
+      : visual === 'on_trip'
+      ? 'A caminho do destino'
+      : 'Motorista a caminho';
+
+  const navStripSubtitle =
+    visual === 'driver_arrived'
+      ? 'Dirija-se ao local de recolha'
+      : visual === 'on_trip'
+      ? (state?.dropoff_address || 'Destino')
+      : (state?.pickup_address || 'A aguardar localização');
+
+  const handleGoToMenu = useCallback(() => {
+    router.replace('/(tabs)');
+  }, [router]);
 
   useEffect(() => {
     if (visual !== 'on_trip') {
@@ -194,24 +236,14 @@ export default function CurrentRideScreen() {
     if (isTerminal) stopPolling();
   }, [isTerminal, stopPolling]);
 
-  useEffect(() => {
-    if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-      UIManager.setLayoutAnimationEnabledExperimental(true);
-    }
-  }, []);
 
-  /** Alinhado a Zamba-Mocambique `page.tsx`: colapsar card "viagem iniciada" após 5s. */
   useEffect(() => {
-    if (uiState === 'on_trip') {
-      setIsTripCardCollapsed(false);
-      const timer = setTimeout(() => {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-        setIsTripCardCollapsed(true);
-      }, 5000);
-      return () => clearTimeout(timer);
-    }
-    setIsTripCardCollapsed(false);
-  }, [uiState]);
+    if (visual !== 'on_trip') return;
+    const interval = setInterval(() => {
+      setElapsedMin(Math.floor((Date.now() - tripStartedAt) / 60000));
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [visual, tripStartedAt]);
 
   useEffect(() => {
     if (visual !== 'on_trip') {
@@ -230,7 +262,9 @@ export default function CurrentRideScreen() {
   useEffect(() => {
     if (!rideId) return;
     rideService.getLiveRoute(rideId).then(setLiveRoute);
-    const unsub = rideService.subscribeToLiveRoute(rideId, setLiveRoute);
+    const unsub = rideService.subscribeToLiveRoute(rideId, setLiveRoute, {
+      scope: 'current-ride-screen',
+    });
     return unsub;
   }, [rideId]);
 
@@ -238,11 +272,6 @@ export default function CurrentRideScreen() {
     final_fare?: unknown;
     price_estimate?: unknown;
   } | null>(null);
-
-  useEffect(() => {
-    if (visual !== 'completed' || !rideId) return;
-    rideService.checkDriverRatingExists(rideId).then(setHasExistingRating);
-  }, [visual, rideId]);
 
   /** Total pago: fonte oficial `rides` (mesma regra que `coalesce(final_fare, price_estimate)`). */
   useEffect(() => {
@@ -283,30 +312,6 @@ export default function CurrentRideScreen() {
     });
   }, [visual, rideId, state, router]);
 
-  const polylineCoords = useMemo(() => {
-    if (!liveRoute?.polyline?.trim()) return [];
-    try {
-      return downsampleRouteCoordinates(decodePolyline(liveRoute.polyline));
-    } catch {
-      return [];
-    }
-  }, [liveRoute?.polyline]);
-
-  /** Android aplica melhor a cor com `strokeColors` preenchido (ver `map.tsx`). */
-  const polylineStrokeColors = useMemo(() => {
-    if (polylineCoords.length < 2) return undefined;
-    return new Array(polylineCoords.length).fill(ROUTE_POLYLINE_COLOR);
-  }, [polylineCoords]);
-
-  const driverLat =
-    liveRoute?.last_driver_lat ??
-    driverInfo?.lat ??
-    state?.driver_lat;
-  const driverLng =
-    liveRoute?.last_driver_lng ??
-    driverInfo?.lng ??
-    state?.driver_lng;
-
   const pickupLat = state?.pickup_lat ?? liveRoute?.start_lat;
   const pickupLng = state?.pickup_lng ?? liveRoute?.start_lng;
   const destLat = state?.destination_lat ?? liveRoute?.end_lat;
@@ -317,72 +322,52 @@ export default function CurrentRideScreen() {
       ? Math.max(1, Math.round(liveRoute.duration_seconds / 60))
       : null;
 
-  const mapPoints = useMemo(() => {
-    const pts: LatLng[] = [];
-    if (polylineCoords.length) pts.push(...polylineCoords);
-    if (driverLat != null && driverLng != null) {
-      pts.push({ latitude: driverLat, longitude: driverLng });
-    }
-    if (pickupLat != null && pickupLng != null) {
-      pts.push({ latitude: pickupLat, longitude: pickupLng });
-    }
-    if (destLat != null && destLng != null) {
-      pts.push({ latitude: destLat, longitude: destLng });
-    }
-    return pts;
-  }, [polylineCoords, driverLat, driverLng, pickupLat, pickupLng, destLat, destLng]);
-
-  const lastPolylineForCameraRef = useRef<string | undefined>(undefined);
-  const lastCameraFitAtRef = useRef(0);
-
-  useEffect(() => {
-    if (!mapReady || cardHeight === 0) return;
-    const poly = liveRoute?.polyline;
-    const polyChanged = poly !== lastPolylineForCameraRef.current;
-    lastPolylineForCameraRef.current = poly;
-
-    const now = Date.now();
-    if (
-      !polyChanged &&
-      lastCameraFitAtRef.current > 0 &&
-      now - lastCameraFitAtRef.current < 2600
-    ) {
-      return;
-    }
-
-    const t = setTimeout(() => {
-      lastCameraFitAtRef.current = Date.now();
-      if (mapPoints.length >= 2) {
-        fitMapCamera(mapRef, mapPoints);
-      } else if (driverLat != null && driverLng != null) {
-        mapRef.current?.animateToRegion(
-          {
-            latitude: driverLat,
-            longitude: driverLng,
-            latitudeDelta: 0.02,
-            longitudeDelta: 0.02,
-          },
-          400,
-        );
-      }
-    }, 350);
-    return () => clearTimeout(t);
-  }, [mapReady, mapPoints, cardHeight, driverLat, driverLng, liveRoute?.polyline]);
-
   const recenter = useCallback(() => {
-    if (mapPoints.length >= 2) fitMapCamera(mapRef, mapPoints);
-    else if (driverLat != null && driverLng != null) {
-      mapRef.current?.animateToRegion(
-        {
-          latitude: driverLat,
-          longitude: driverLng,
-          latitudeDelta: 0.02,
-          longitudeDelta: 0.02,
-        },
-        300,
-      );
-    }
-  }, [mapPoints, driverLat, driverLng]);
+    setRecenterSignal((n) => n + 1);
+  }, []);
+
+  const mapPadding = useMemo(
+    () => ({
+      top: showNavStrip ? navStripHeight + 4 : insets.top + 8,
+      right: visual === 'on_trip' ? 70 : 12,
+      bottom: cardHeight + 8,
+      left: 12,
+    }),
+    [showNavStrip, navStripHeight, insets.top, visual, cardHeight],
+  );
+
+  const tripProgress =
+    etaMinutes != null && etaMinutes > 0
+      ? Math.max(0.05, Math.min(0.95, elapsedMin / (elapsedMin + etaMinutes)))
+      : 0.05;
+
+  const tripStartLabel = new Date(tripStartedAt).toLocaleTimeString('pt-MZ', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
+  const tripDurationLabel =
+    elapsedMin < 60
+      ? `${elapsedMin} min`
+      : `${Math.floor(elapsedMin / 60)}h ${String(elapsedMin % 60).padStart(2, '0')}min`;
+
+  const tripArrivalLabel =
+    etaMinutes != null
+      ? new Date(Date.now() + etaMinutes * 60000).toLocaleTimeString('pt-MZ', {
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '--:--';
+
+  const initialRegion = useMemo(
+    () => ({
+      latitude: driverLat ?? pickupLat ?? -25.9692,
+      longitude: driverLng ?? pickupLng ?? 32.5732,
+      latitudeDelta: 0.06,
+      longitudeDelta: 0.06,
+    }),
+    [driverLat, driverLng, pickupLat, pickupLng],
+  );
 
   const driverName = driverInfo?.full_name ?? state?.driver_name ?? 'Motorista';
   const driverPhone = driverInfo?.phone ?? state?.driver_phone;
@@ -425,10 +410,71 @@ export default function CurrentRideScreen() {
     ]);
   };
 
-  const handleCall = () => {
-    if (driverPhone) Linking.openURL(`tel:${driverPhone}`);
-    else Alert.alert('Indisponível', 'Número do motorista indisponível.');
-  };
+  const openPhoneCall = useCallback(async () => {
+    if (!driverPhone) {
+      Alert.alert('Indisponível', 'Número do motorista indisponível.');
+      return;
+    }
+    const raw = String(driverPhone).replace(/[^\d+]/g, '');
+    if (!raw) {
+      Alert.alert('Indisponível', 'Número do motorista indisponível.');
+      return;
+    }
+    const url = `tel:${raw}`;
+    try {
+      if (Platform.OS === 'ios') {
+        const can = await Linking.canOpenURL(url);
+        if (!can) {
+          Alert.alert('Indisponível', 'Não é possível iniciar chamada telefónica neste dispositivo.');
+          return;
+        }
+      }
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert('Erro', 'Não foi possível abrir o discador.');
+    }
+  }, [driverPhone]);
+
+  const startZambaInternetCall = useCallback(async () => {
+    if (!rideId?.trim()) {
+      Alert.alert('Indisponível', 'Identificador da viagem em falta.');
+      return;
+    }
+    const receiverUserId =
+      driverInfo?.user_id?.trim() ||
+      state?.driver_user_id?.trim() ||
+      '';
+    if (!receiverUserId) {
+      Alert.alert(
+        'Indisponível',
+        'Não foi possível obter o utilizador (auth) do motorista. Peça à API para expor user_id ou driver_user_id na resposta.',
+      );
+      return;
+    }
+    setCallOptionsOpen(false);
+    try {
+      await startOutboundInternetCall({
+        rideId,
+        receiverUserId,
+        driverName,
+        driverAvatarUrl: avatarUrl ?? null,
+      });
+    } catch (error: unknown) {
+      console.error('[currentRide] startZambaInternetCall erro técnico:', error);
+      Alert.alert('Erro', error instanceof Error ? error.message : rideCallUserMessage(error, 'start'));
+    }
+  }, [
+    rideId,
+    state?.driver_user_id,
+    driverInfo?.user_id,
+    driverName,
+    avatarUrl,
+    startOutboundInternetCall,
+  ]);
+
+  const handleCallOptions = useCallback(() => {
+    setCallOptionsOpen(true);
+  }, []);
 
   const handleChat = () => {
     Alert.alert('Chat', 'Em breve disponível no aplicativo.');
@@ -456,30 +502,6 @@ export default function CurrentRideScreen() {
       return;
     }
     setShowDriverInfoModal(true);
-  };
-
-  const handleSubmitRating = async () => {
-    if (!rating || !state?.driver_id || !rideId) return;
-    const user = await authService.getCurrentUser();
-    if (!user) {
-      Alert.alert('Erro', 'Inicie sessão para avaliar.');
-      return;
-    }
-    setIsSubmittingRating(true);
-    try {
-      await rideService.submitDriverRating({
-        driver_id: state.driver_id,
-        ride_id: rideId,
-        passenger_id: user.id,
-        rating,
-        comment: ratingComment.trim() || undefined,
-      });
-      setRatingSuccess(true);
-    } catch {
-      Alert.alert('Erro', 'Não foi possível enviar a avaliação.');
-    } finally {
-      setIsSubmittingRating(false);
-    }
   };
 
   const goHome = () => {
@@ -529,139 +551,157 @@ export default function CurrentRideScreen() {
     );
   }
 
-  const initialRegion = {
-    latitude: driverLat ?? pickupLat ?? -25.9692,
-    longitude: driverLng ?? pickupLng ?? 32.5732,
-    latitudeDelta: 0.06,
-    longitudeDelta: 0.06,
-  };
-
   return (
     <View style={styles.container}>
-      <MapView
-        ref={mapRef}
-        style={styles.mapFill}
-        provider={PROVIDER_GOOGLE}
-        customMapStyle={MAP_STYLE_CLEAN}
-        userInterfaceStyle="light"
+      <PassengerActiveRideMap
+        rideId={rideId}
+        uiState={uiState}
+        visual={visual}
+        liveRoute={liveRoute}
+        pickup={{ lat: pickupLat, lng: pickupLng, address: state?.pickup_address }}
+        destination={{ lat: destLat, lng: destLng, address: state?.dropoff_address }}
+        driverLocation={{ lat: driverLat, lng: driverLng }}
+        mapPadding={mapPadding}
+        recenterSignal={recenterSignal}
         initialRegion={initialRegion}
-        showsUserLocation
-        showsMyLocationButton={false}
-        showsTraffic={false}
-        toolbarEnabled={false}
-        mapPadding={{
-          top: insets.top + 8,
-          right: 12,
-          bottom: cardHeight + 8,
-          left: 12,
-        }}
-        onMapReady={() => setMapReady(true)}
-      >
-        {polylineCoords.length > 0 && (
-          <Polyline
-            coordinates={polylineCoords}
-            strokeColor={ROUTE_POLYLINE_COLOR}
-            strokeColors={polylineStrokeColors}
-            strokeWidth={5}
-            lineCap="round"
-            lineJoin="round"
-            geodesic
-            zIndex={999}
-          />
-        )}
-        {driverLat != null && driverLng != null && (
-          <Marker coordinate={{ latitude: driverLat, longitude: driverLng }} anchor={{ x: 0.5, y: 0.5 }}>
-            <View style={styles.driverPin}>
-              <Ionicons name="car-sport" size={22} color="#374151" />
-            </View>
-          </Marker>
-        )}
-        {pickupLat != null && pickupLng != null && visual !== 'on_trip' && (
-          <Marker coordinate={{ latitude: pickupLat, longitude: pickupLng }} anchor={{ x: 0.5, y: 1 }}>
-            <View style={styles.redPin}>
-              <View style={styles.redPinInner} />
-            </View>
-          </Marker>
-        )}
-        {destLat != null && destLng != null && visual === 'on_trip' && (
-          <Marker coordinate={{ latitude: destLat, longitude: destLng }} anchor={{ x: 0.5, y: 0.5 }}>
-            <View style={styles.destDotOuter}>
-              <View style={styles.destDotInner} />
-            </View>
-          </Marker>
-        )}
-      </MapView>
+      />
 
-      <TouchableOpacity
-        style={[styles.recenterFab, { top: insets.top + 12 }]}
-        onPress={recenter}
-        accessibilityRole="button"
-        accessibilityLabel="Recentrar mapa"
-      >
-        <Ionicons name="navigate" size={22} color="#111827" />
-      </TouchableOpacity>
+      {/* ── NAV STRIP (top bar verde, fase activa) ── */}
+      {showNavStrip && (
+        <View
+          style={[styles.navStrip, { position: 'absolute', top: insets.top + 4, left: 10, right: 10, zIndex: 20 }]}
+          onLayout={(e) => setNavStripHeight(insets.top + 4 + e.nativeEvent.layout.height + 4)}
+        >
+          <TouchableOpacity
+            style={styles.navBackBtn}
+            onPress={handleGoToMenu}
+            accessibilityRole="button"
+            accessibilityLabel="Voltar"
+          >
+            <Ionicons name="chevron-back" size={20} color="#FFFFFF" />
+          </TouchableOpacity>
+          <View style={styles.navPickupInstrCol}>
+            <Text style={styles.navInstruction} numberOfLines={1}>{navStripTitle}</Text>
+            <Text style={styles.navSecondaryText} numberOfLines={1}>{navStripSubtitle}</Text>
+          </View>
+          {etaMinutes != null && (
+            <>
+              <View style={styles.navPickupVertDivider} />
+              <View style={styles.navOntripMetaCol}>
+                <View style={styles.navOntripMetaTop}>
+                  <Ionicons name="time-outline" size={12} color="#FFFFFF" />
+                  <Text style={styles.navOntripMetaValue}> {etaMinutes} min</Text>
+                </View>
+                <Text style={styles.navOntripMetaSub}>Chegada</Text>
+              </View>
+            </>
+          )}
+        </View>
+      )}
 
-      {/* Painéis inferiores — espelho funcional de Zamba-Mocambique `page.tsx` */}
+      {/* ── RECENTER FAB (estados sem navStrip) ── */}
+      {!showNavStrip && (
+        <TouchableOpacity
+          style={[styles.recenterFab, { top: insets.top + 12 }]}
+          onPress={recenter}
+          accessibilityRole="button"
+          accessibilityLabel="Recentrar mapa"
+        >
+          <Ionicons name="navigate" size={22} color="#111827" />
+        </TouchableOpacity>
+      )}
+
+      {/* ── COMPACT MAP ACTIONS (coluna direita, acima do card inferior) ── */}
+      {showNavStrip && (
+        <View style={[styles.pickupMapActions, { bottom: cardHeight + 12 }]}>
+          {visual === 'on_trip' ? (
+            <>
+              <AnimatedSideActionButton
+                label="Minha localização"
+                onPress={recenter}
+                iconName="locate"
+                iconColor={EMERALD}
+                accessibilityLabel="Recentrar mapa"
+                staggerIndex={0}
+              />
+              <AnimatedSideActionButton
+                label="Partilhar viagem"
+                onPress={handleShareTrip}
+                iconName="share-social-outline"
+                iconColor="#2563EB"
+                accessibilityLabel="Partilhar viagem"
+                staggerIndex={1}
+              />
+              <AnimatedSideActionButton
+                label="Emergência SOS"
+                onPress={handleSos}
+                variant="sos"
+                accessibilityLabel="SOS Emergência"
+                staggerIndex={2}
+              />
+              <AnimatedSideActionButton
+                label="Informações do motorista"
+                onPress={handleDriverInfoCollapsed}
+                imageUri={avatarUrl}
+                iconName="person"
+                iconColor="#374151"
+                accessibilityLabel="Informações do motorista"
+                staggerIndex={3}
+              />
+            </>
+          ) : (
+            <TouchableOpacity
+              style={styles.pickupMapActionBtn}
+              onPress={recenter}
+              accessibilityRole="button"
+              accessibilityLabel="Recentrar mapa"
+            >
+              <Ionicons name="locate" size={20} color={EMERALD} />
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
+      {/* ── CARD INFERIOR: RECOLHA ── */}
       {(visual === 'driver_assigned' || visual === 'driver_arrived') && (
         <View
-          style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}
+          style={[styles.bottomSheet, styles.bottomSheetCompact, { paddingBottom: insets.bottom + 12 }]}
           onLayout={(e) => setCardHeight(e.nativeEvent.layout.height)}
         >
           <View style={styles.handle} />
-          <View style={styles.headerRow}>
-            <View style={styles.headerTextCol}>
-              <Text style={styles.titleLg}>
-                {visual === 'driver_arrived' ? 'O seu motorista chegou' : 'Motorista a caminho'}
-              </Text>
-              <Text style={styles.subtitle}>
-                {visual === 'driver_arrived'
-                  ? 'Dirija-se ao ponto de recolha'
-                  : 'O seu motorista está a dirigir-se ao local de recolha'}
-              </Text>
-            </View>
-            <View style={styles.checkSquare}>
-              <Ionicons name="checkmark-circle" size={24} color="#FFF" />
-            </View>
-          </View>
-
-          <View style={styles.driverRowCard}>
-            <View style={styles.avatarBtn}>
-              {avatarUrl ? (
-                <Image source={{ uri: avatarUrl }} style={styles.avatarImg} contentFit="cover" />
-              ) : (
-                <Ionicons name="person-circle" size={40} color="#D1D5DB" />
+          <View style={styles.pickupCompactCard}>
+            <View style={styles.driverRowCard}>
+              <View style={styles.avatarBtn}>
+                {avatarUrl ? (
+                  <Image source={{ uri: avatarUrl }} style={styles.avatarImg} contentFit="cover" />
+                ) : (
+                  <Ionicons name="person-circle" size={40} color="#D1D5DB" />
+                )}
+              </View>
+              <View style={styles.driverTextCol}>
+                <Text style={styles.driverName} numberOfLines={1}>{driverName}</Text>
+                <View style={styles.ratingVehicleRow}>
+                  <Ionicons name="star" size={12} color="#FBBF24" />
+                  <Text style={styles.ratingVehicleText}> {ratingDisplay} • {vehicleLine || '—'}</Text>
+                </View>
+              </View>
+              {!!vehiclePlate && (
+                <View style={styles.platePill}>
+                  <Text style={styles.plateText}>{vehiclePlate}</Text>
+                </View>
               )}
             </View>
-            <View style={styles.driverTextCol}>
-              <Text style={styles.driverName} numberOfLines={1}>
-                {driverName}
-              </Text>
-              <View style={styles.ratingVehicleRow}>
-                <Ionicons name="star" size={12} color="#FBBF24" />
-                <Text style={styles.ratingVehicleText}>
-                  {' '}
-                  {ratingDisplay} • {vehicleLine || '—'}
-                </Text>
-              </View>
+            <View style={styles.timelineActionsRow}>
+              <TouchableOpacity style={styles.pickupOutlineAction} onPress={handleChat} activeOpacity={0.85}>
+                <Ionicons name="chatbubble-ellipses-outline" size={16} color="#374151" />
+                <Text style={styles.pickupOutlineActionText}>Chat</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.pickupOutlineAction} onPress={handleCallOptions} activeOpacity={0.85}>
+                <Ionicons name="call" size={16} color="#374151" />
+                <Text style={styles.pickupOutlineActionText}>Ligar</Text>
+              </TouchableOpacity>
             </View>
-            {!!vehiclePlate && (
-              <View style={styles.platePill}>
-                <Text style={styles.plateText}>{vehiclePlate}</Text>
-              </View>
-            )}
           </View>
-
-          <View style={styles.btnGrid}>
-            <TouchableOpacity style={styles.chatBtn} onPress={handleChat} activeOpacity={0.85}>
-              <Ionicons name="chatbubble-outline" size={18} color="#64748B" />
-              <Text style={styles.chatBtnText}>Chat</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.callBtn} onPress={handleCall} activeOpacity={0.85}>
-              <Ionicons name="call" size={18} color="#FFF" />
-              <Text style={styles.callBtnText}>Ligar</Text>
-            </TouchableOpacity>
-          </View>
-
           {canCancelTrip && (
             <TouchableOpacity style={styles.cancelGhost} onPress={handleCancel}>
               <Text style={styles.cancelGhostText}>Cancelar viagem</Text>
@@ -670,99 +710,26 @@ export default function CurrentRideScreen() {
         </View>
       )}
 
+      {/* ── CARD INFERIOR: EM VIAGEM ── */}
       {visual === 'on_trip' && (
         <Animated.View
           style={[
-            styles.sheet,
-            styles.sheetOnTrip,
+            styles.bottomSheet,
+            styles.bottomSheetCompact,
+            styles.ontripBottomCard,
             onTripSheetAnimatedStyle,
-            { paddingBottom: insets.bottom + (isTripCardCollapsed ? 12 : 18) },
+            { paddingBottom: insets.bottom + 6 },
           ]}
           onLayout={(e) => setCardHeight(e.nativeEvent.layout.height)}
         >
-          <View style={styles.handleOnTrip} />
-          {!isTripCardCollapsed ? (
-            <>
-              <View style={styles.onTripIconWrap}>
-                <Ionicons name="navigate" size={30} color={EMERALD} />
-              </View>
-              <Text style={styles.onTripTitle}>Viagem iniciada</Text>
-              <Text style={styles.onTripSub}>
-                Por favor, coloque o cinto de segurança. Boa viagem.
-              </Text>
-              <View style={styles.destEtaRow}>
-                <View style={styles.destEtaCol}>
-                  <Text style={styles.destEtaLabel}>DESTINO</Text>
-                  <Text style={styles.destEtaValue} numberOfLines={2}>
-                    {state?.dropoff_address ?? '—'}
-                  </Text>
-                </View>
-                <View style={styles.destEtaColEnd}>
-                  <Text style={styles.destEtaLabel}>CHEGADA</Text>
-                  <Text style={styles.etaGreen}>
-                    {etaMinutes != null ? `${etaMinutes} min` : '-- min'}
-                  </Text>
-                </View>
-              </View>
-            </>
-          ) : (
-            <View style={styles.tripActionsRow}>
-              <TouchableOpacity
-                style={styles.tripActionCol}
-                onPress={handleShareTrip}
-                activeOpacity={0.88}
-                accessibilityRole="button"
-                accessibilityLabel="Partilhar viagem"
-              >
-                <View style={styles.tripIconSlot}>
-                  <View style={styles.tripShareCircle}>
-                    <Ionicons name="share-outline" size={22} color="#FFF" />
-                  </View>
-                </View>
-                <Text style={styles.tripBlockLine1}>PARTILHAR</Text>
-                <Text style={styles.tripBlockLine2}>VIAGEM</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.tripActionCol}
-                onPress={handleSos}
-                activeOpacity={0.9}
-                accessibilityRole="button"
-                accessibilityLabel="SOS emergência"
-              >
-                <View style={styles.tripIconSlot}>
-                  <SosTripActionIcon />
-                </View>
-                <Text style={styles.tripBlockLine1Sos}>SOS</Text>
-                <Text style={styles.tripBlockLine2Sos}>EMERGÊNCIA</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.tripActionCol}
-                onPress={handleDriverInfoCollapsed}
-                activeOpacity={0.88}
-                accessibilityRole="button"
-                accessibilityLabel="Informações do motorista"
-              >
-                <View style={styles.tripIconSlot}>
-                  <View style={styles.tripDriverCircle}>
-                    <CachedRemoteImage
-                      uri={driverInfo?.avatar_url}
-                      style={styles.tripDriverPhoto}
-                      cacheScope="trip-bar-driver"
-                      fallback={
-                        <View style={styles.tripDriverPhotoFallback}>
-                          <Ionicons name="person-outline" size={24} color="#475569" />
-                        </View>
-                      }
-                    />
-                  </View>
-                </View>
-                <Text style={styles.tripBlockLine1}>MOTORISTA</Text>
-                <Text style={styles.tripBlockLine2}>INFORMAÇÕES</Text>
-              </TouchableOpacity>
-            </View>
-          )}
+          <View style={styles.ontripGrabber} />
+          <PassengerTripTimeline
+            progress={tripProgress}
+            startLabel={tripStartLabel}
+            centerLabel={tripDurationLabel}
+            arrivalLabel={tripArrivalLabel}
+            compact
+          />
         </Animated.View>
       )}
 
@@ -791,44 +758,7 @@ export default function CurrentRideScreen() {
                 </Text>
               </View>
 
-              {!hasExistingRating && !ratingSuccess ? (
-                <View style={styles.ratingBlock}>
-                  <Text style={styles.ratingPrompt}>Como foi o motorista?</Text>
-                  <CompletedTripStars rating={rating} onSelect={setRating} />
-                  <Text style={styles.commentLabel}>Comentário (opcional)</Text>
-                  <TextInput
-                    style={styles.commentInput}
-                    placeholder="Partilhe a sua experiência…"
-                    placeholderTextColor="#64748B"
-                    value={ratingComment}
-                    onChangeText={setRatingComment}
-                    multiline
-                    maxLength={500}
-                  />
-                  <TouchableOpacity
-                    style={[styles.sendRatingBtn, (!rating || isSubmittingRating) && styles.sendRatingBtnDisabled]}
-                    disabled={!rating || isSubmittingRating}
-                    onPress={handleSubmitRating}
-                    activeOpacity={0.92}
-                  >
-                    <Text
-                      style={[
-                        styles.sendRatingBtnText,
-                        (!rating || isSubmittingRating) && styles.sendRatingBtnTextDisabled,
-                      ]}
-                    >
-                      {isSubmittingRating ? 'A enviar…' : 'Enviar avaliação'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <View style={styles.thanksBox}>
-                  <View style={styles.thanksIcon}>
-                    <Ionicons name="checkmark" size={18} color="#FFF" />
-                  </View>
-                  <Text style={styles.thanksText}>Obrigado pela sua avaliação!</Text>
-                </View>
-              )}
+              <DriverRatingSection rideId={rideId!} driverId={state?.driver_id} />
 
               <TouchableOpacity style={styles.homeSecondaryBtn} onPress={goHome} activeOpacity={0.88}>
                 <Text style={styles.homeSecondaryBtnText}>Voltar ao início</Text>
@@ -880,6 +810,32 @@ export default function CurrentRideScreen() {
         visible={showDriverInfoModal}
         onClose={() => setShowDriverInfoModal(false)}
         rideId={rideId}
+        driverId={state?.driver_id}
+      />
+      <DriverCallOptionsModal
+        visible={callOptionsOpen}
+        onClose={() => setCallOptionsOpen(false)}
+        onZamba={startZambaInternetCall}
+        onPhone={openPhoneCall}
+      />
+      <PassengerInternetCallPanel
+        visible={outboundCallVisible}
+        uiPhase={outboundCallPhase}
+        title={outboundCallTitle}
+        subtitle={outboundCallSubtitle}
+        driverName={outboundDriverName}
+        driverAvatarUrl={outboundDriverAvatarUrl}
+        durationSec={outboundDurationSec}
+        showDuration={outboundShowDuration}
+        isWaiting={outboundCallWaiting}
+        micMuted={outboundMicMuted}
+        speakerOn={outboundSpeakerOn}
+        hangupBusy={outboundHangupBusy}
+        remoteStreamUrl={outboundRemoteStreamUrl}
+        onToggleMic={toggleOutboundMicMuted}
+        onToggleSpeaker={() => void toggleOutboundSpeaker()}
+        onHangUp={() => void hangUpOutboundInternetCall()}
+        onDismiss={dismissOutboundInternetCall}
       />
     </View>
   );
@@ -892,6 +848,22 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
   },
   muted: { color: '#6B7280', fontSize: 14, fontWeight: '600' },
+  menuFab: {
+    position: 'absolute',
+    left: 16,
+    backgroundColor: '#FFF',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 6,
+    zIndex: 5,
+  },
   recenterFab: {
     position: 'absolute',
     right: 16,
@@ -1007,25 +979,232 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginBottom: 10,
   },
-  sheetOnTrip: {
-    paddingHorizontal: 18,
-    paddingTop: 8,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    borderTopWidth: 0,
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: -8 },
-    shadowOpacity: 0.12,
-    shadowRadius: 24,
-    elevation: 18,
+  sideActionsCol: {
+    position: 'absolute',
+    right: 14,
+    top: '28%',
+    zIndex: 8,
+    alignItems: 'center',
+    gap: 12,
   },
-  handleOnTrip: {
-    width: 42,
+  sideActionCard: {
+    width: 100,
+    backgroundColor: '#FFF',
+    borderRadius: 22,
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  sideShareCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#2563EB',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+    ...Platform.select({
+      ios: { shadowColor: '#2563EB', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 6 },
+      android: { elevation: 3 },
+    }),
+  },
+  sideSosCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#DC2626',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+    ...Platform.select({
+      ios: { shadowColor: '#DC2626', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 6 },
+      android: { elevation: 3 },
+    }),
+  },
+  sideDriverCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#E5E7EB',
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#D1D5DB',
+  },
+  sideDriverPhoto: { width: '100%', height: '100%' } as any,
+  sideDriverFallback: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#E5E7EB',
+  },
+  sideActionLine1: {
+    fontFamily: FONT_BODY,
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#475569',
+    letterSpacing: 0.4,
+    textAlign: 'center',
+    lineHeight: 12,
+  },
+  sideActionLine2: {
+    fontFamily: FONT_BODY,
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#64748B',
+    letterSpacing: 0.35,
+    textAlign: 'center',
+    lineHeight: 12,
+  },
+  sideActionLine1Sos: {
+    fontFamily: FONT_BODY,
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#DC2626',
+    letterSpacing: 0.45,
+    textAlign: 'center',
+    lineHeight: 12,
+  },
+  sideActionLine2Sos: {
+    fontFamily: FONT_BODY,
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#B91C1C',
+    letterSpacing: 0.4,
+    textAlign: 'center',
+    lineHeight: 12,
+  },
+  timelineSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#FFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 28,
+    paddingTop: 10,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 12,
+    zIndex: 10,
+  },
+  timelineHandle: {
+    width: 36,
     height: 4,
     borderRadius: 2,
-    backgroundColor: '#CBD5E1',
+    backgroundColor: '#E2E8F0',
     alignSelf: 'center',
     marginBottom: 16,
+  },
+  progressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 18,
+    height: 14,
+  },
+  progressDotStart: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: EMERALD,
+  },
+  progressBarTrack: {
+    flex: 1,
+    height: 3,
+    backgroundColor: '#E2E8F0',
+    marginHorizontal: 4,
+    borderRadius: 2,
+    position: 'relative',
+    overflow: 'visible',
+  },
+  progressBarFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: EMERALD,
+    borderRadius: 2,
+  },
+  progressCurrentDot: {
+    position: 'absolute',
+    top: -4,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: EMERALD,
+    borderWidth: 2,
+    borderColor: '#FFF',
+    shadowColor: EMERALD,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  progressMidDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#CBD5E1',
+    marginHorizontal: 3,
+  },
+  progressBarTrackEnd: {
+    flex: 1,
+    height: 3,
+    backgroundColor: '#E2E8F0',
+    marginHorizontal: 4,
+    borderRadius: 2,
+    justifyContent: 'center',
+  },
+  progressDotEnd: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#EF4444',
+  },
+  timelineInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  timelineInfoCol: { alignItems: 'flex-start' },
+  timelineInfoColCenter: { alignItems: 'center' },
+  timelineInfoColEnd: { alignItems: 'flex-end' },
+  timelineLabel: {
+    fontFamily: FONT_BODY,
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#94A3B8',
+    marginBottom: 2,
+  },
+  timelineValueDark: {
+    fontFamily: FONT_BODY,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  timelineValueGreen: {
+    fontFamily: FONT_BODY,
+    fontSize: 18,
+    fontWeight: '700',
+    color: EMERALD,
+  },
+  timelineValueRed: {
+    fontFamily: FONT_BODY,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#EF4444',
   },
   headerRow: {
     flexDirection: 'row',
@@ -1170,189 +1349,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: '#94A3B8',
     letterSpacing: 0.15,
-  },
-  onTripIconWrap: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#ECFDF5',
-    alignSelf: 'center',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-  onTripTitle: {
-    fontFamily: FONT_BODY,
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#0F172A',
-    textAlign: 'center',
-    letterSpacing: -0.3,
-  },
-  onTripSub: {
-    fontFamily: FONT_BODY,
-    marginTop: 6,
-    fontSize: 13,
-    fontWeight: '500',
-    color: '#64748B',
-    textAlign: 'center',
-    marginBottom: 18,
-    lineHeight: 18,
-    paddingHorizontal: 8,
-  },
-  destEtaRow: {
-    width: '100%',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    backgroundColor: '#F8FAFC',
-    borderRadius: 18,
-    padding: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#F1F5F9',
-  },
-  destEtaCol: {
-    flex: 1,
-    marginRight: 12,
-    minWidth: 0,
-  },
-  destEtaColEnd: {
-    alignItems: 'flex-end',
-    maxWidth: '42%',
-  },
-  destEtaLabel: {
-    fontFamily: FONT_BODY,
-    fontSize: 9,
-    fontWeight: '700',
-    color: '#94A3B8',
-    letterSpacing: 1.4,
-  },
-  destEtaValue: {
-    fontFamily: FONT_BODY,
-    marginTop: 4,
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#0F172A',
-  },
-  etaGreen: {
-    fontFamily: FONT_BODY,
-    marginTop: 4,
-    fontSize: 15,
-    fontWeight: '700',
-    color: EMERALD,
-    letterSpacing: -0.2,
-  },
-  tripActionsRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    paddingTop: 4,
-    paddingBottom: 6,
-    paddingHorizontal: 2,
-    overflow: 'visible',
-  },
-  tripActionCol: {
-    flex: 1,
-    minWidth: 0,
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingHorizontal: 2,
-  },
-  /** Altura fixa para alinhar os três ícones no mesmo eixo vertical. */
-  tripIconSlot: {
-    width: '100%',
-    height: 72,
-    marginBottom: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'visible',
-  },
-  tripShareCircle: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: '#2563EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#2563EB',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.28,
-        shadowRadius: 8,
-      },
-      android: { elevation: 4 },
-    }),
-  },
-  tripDriverCircle: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: '#E5E7EB',
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#D1D5DB',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.08,
-        shadowRadius: 3,
-      },
-      android: { elevation: 2 },
-    }),
-  },
-  tripDriverPhoto: {
-    width: '100%',
-    height: '100%',
-  },
-  tripDriverPhotoFallback: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#E5E7EB',
-  },
-  tripBlockLine1: {
-    fontFamily: FONT_BODY,
-    fontSize: 9,
-    fontWeight: '800',
-    color: '#64748B',
-    letterSpacing: 0.35,
-    textAlign: 'center',
-    lineHeight: 11,
-  },
-  tripBlockLine2: {
-    fontFamily: FONT_BODY,
-    fontSize: 9,
-    fontWeight: '700',
-    color: '#64748B',
-    letterSpacing: 0.35,
-    textAlign: 'center',
-    lineHeight: 11,
-    marginTop: 2,
-  },
-  tripBlockLine1Sos: {
-    fontFamily: FONT_BODY,
-    fontSize: 9,
-    fontWeight: '800',
-    color: '#DC2626',
-    letterSpacing: 0.45,
-    textAlign: 'center',
-    lineHeight: 11,
-  },
-  tripBlockLine2Sos: {
-    fontFamily: FONT_BODY,
-    fontSize: 9,
-    fontWeight: '700',
-    color: '#B91C1C',
-    letterSpacing: 0.4,
-    textAlign: 'center',
-    lineHeight: 11,
-    marginTop: 2,
   },
   completedInner: {
     alignItems: 'center',
@@ -1569,5 +1565,234 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '900',
     letterSpacing: 2,
+  },
+
+  // ── NAV STRIP ────────────────────────────────────────────────
+  navStrip: {
+    backgroundColor: '#0F5132',
+    paddingHorizontal: 8,
+    paddingBottom: 8,
+    borderRadius: 14,
+    overflow: 'hidden',
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 56,
+    gap: 6,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.18,
+        shadowRadius: 10,
+      },
+      android: { elevation: 10 },
+    }),
+  },
+  navBackBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  navPickupInstrCol: {
+    flex: 1,
+    minWidth: 0,
+    justifyContent: 'center',
+    paddingVertical: 2,
+    gap: 2,
+  },
+  navInstruction: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.15,
+  },
+  navSecondaryText: {
+    fontSize: 12,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.88)',
+  },
+  navPickupVertDivider: {
+    width: StyleSheet.hairlineWidth,
+    alignSelf: 'stretch',
+    minHeight: 36,
+    backgroundColor: 'rgba(255,255,255,0.28)',
+    marginHorizontal: 2,
+    flexShrink: 0,
+  },
+  navOntripMetaCol: {
+    width: 78,
+    flexShrink: 0,
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+  },
+  navOntripMetaTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  navOntripMetaValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  navOntripMetaSub: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.85)',
+    textAlign: 'right',
+  },
+
+  // ── COMPACT MAP ACTIONS (coluna FAB direita) ──────────────────
+  pickupMapActions: {
+    position: 'absolute',
+    right: 14,
+    zIndex: 15,
+    gap: 8,
+    alignItems: 'center',
+  },
+  pickupMapActionBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.14,
+        shadowRadius: 6,
+      },
+      android: { elevation: 5 },
+    }),
+  },
+  pickupMapActionAvatar: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+  },
+  pickupMapActionBtnSos: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#E5262E',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.14,
+        shadowRadius: 6,
+      },
+      android: { elevation: 5 },
+    }),
+  },
+  pickupMapActionSosText: {
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    color: '#FFFFFF',
+  },
+
+  // ── BOTTOM SHEET (novo, substituí pickup/ontrip) ──────────────
+  bottomSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#F1F5F9',
+    zIndex: 10,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+      },
+      android: { elevation: 16 },
+    }),
+  },
+  bottomSheetCompact: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
+
+  // ── PICKUP COMPACT CARD (interior do bottomSheet) ─────────────
+  pickupCompactCard: {
+    borderRadius: 18,
+    marginHorizontal: 2,
+    paddingTop: 8,
+    paddingBottom: 10,
+    paddingHorizontal: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#E2E8F0',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -2 },
+        shadowOpacity: 0.08,
+        shadowRadius: 8,
+      },
+      android: { elevation: 8 },
+    }),
+  },
+  timelineActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 8,
+    marginTop: 10,
+  },
+  pickupOutlineAction: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 12,
+    paddingHorizontal: 6,
+    borderRadius: 12,
+    backgroundColor: '#F8FAFC',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#E2E8F0',
+  },
+  pickupOutlineActionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#374151',
+  },
+
+  // ── ON TRIP CARD ──────────────────────────────────────────────
+  ontripBottomCard: {
+    paddingTop: 2,
+    paddingBottom: 0,
+    paddingHorizontal: 10,
+  },
+  ontripGrabber: {
+    alignSelf: 'center',
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#E2E8F0',
+    marginTop: 2,
+    marginBottom: 4,
   },
 });

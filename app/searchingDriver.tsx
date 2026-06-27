@@ -18,6 +18,8 @@ import { useNearbyDrivers } from '@/hooks/useNearbyDrivers';
 import { rideService } from '@/services/rideService';
 import { fitMapCamera, type LatLng } from '@/utils/mapCamera';
 import { isSearchingUiState } from '@/lib/passengerRideVisualState';
+import { prepareCategoryRetryNavigation, logCategoryRetry } from '@/lib/categoryRetry';
+import { clearTripDraft } from '@/services/searchFlowStore';
 import { ROUTE_POLYLINE_COLOR } from '@/lib/tripMapTheme';
 import { ANDROID_MAPVIEW_TILE_PROPS } from '@/lib/mapViewAndroid';
 
@@ -124,6 +126,12 @@ export default function SearchingDriverScreen() {
   }, [mapReady, mapPoints, cardHeight]);
 
   const noDriver = uiState === 'no_driver_available_for_category';
+
+  useEffect(() => {
+    if (noDriver) {
+      logCategoryRetry('no driver available');
+    }
+  }, [noDriver]);
 
   useEffect(() => {
     if (noDriver) return;
@@ -234,14 +242,33 @@ export default function SearchingDriverScreen() {
             style={styles.noDriverPrimaryBtn}
             activeOpacity={0.88}
             onPress={async () => {
+              const prepared = prepareCategoryRetryNavigation(state, {
+                pickupLat: params.pickupLat,
+                pickupLng: params.pickupLng,
+                pickupAddress: params.pickupAddress,
+                vehicleCategory: params.vehicleCategory,
+              });
+
+              if (!prepared) {
+                Alert.alert(
+                  'Erro',
+                  'Não foi possível restaurar os dados da viagem. Volte a escolher o destino.',
+                );
+                return;
+              }
+
               if (rideId) {
                 try {
                   await rideService.cancelRide(rideId);
                 } catch {
-                  /* ignore */
+                  /* ignore — draft local preservado para nova tentativa */
                 }
               }
-              router.replace('/map' as any);
+
+              router.replace({
+                pathname: '/map' as any,
+                params: prepared.mapParams,
+              });
             }}
           >
             <Text style={styles.noDriverPrimaryBtnText}>Seleccionar outra categoria</Text>
@@ -257,6 +284,7 @@ export default function SearchingDriverScreen() {
                   /* ignore */
                 }
               }
+              clearTripDraft();
               router.replace('/(tabs)');
             }}
           >

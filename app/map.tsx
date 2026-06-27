@@ -19,8 +19,12 @@ import {
   getSelectedDestination,
   getSelectedPickup,
   setSelectedPickup,
+  buildTripDraft,
+  getTripDraft,
+  saveTripDraft,
   type SelectedPickup,
 } from '@/services/searchFlowStore';
+import { assertDraftRestoration, logCategoryRetry } from '@/lib/categoryRetry';
 import type { SelectedDestination } from '@/services/googlePlaces';
 import { GOOGLE_MAPS_API_KEY } from '@/lib/env';
 import { rideService, type VehicleCategory } from '@/services/rideService';
@@ -187,6 +191,8 @@ export default function MapScreen() {
 
   const pickupFromStore = getSelectedPickup();
   const destinationFromStore = getSelectedDestination();
+  const tripDraft = getTripDraft();
+  const isCategoryRetry = toText(params.retryCategory) === '1';
   const [pickupAddress, setPickupAddress] = useState('');
 
   const pickup: SelectedPickup = useMemo(() => {
@@ -199,6 +205,10 @@ export default function MapScreen() {
       return { lat, lng, address: displayAddr };
     }
 
+    if (tripDraft) {
+      return { ...tripDraft.pickup, address: pickupAddress || tripDraft.pickup.address };
+    }
+
     if (pickupFromStore) {
       return { ...pickupFromStore, address: pickupAddress || pickupFromStore.address };
     }
@@ -209,13 +219,24 @@ export default function MapScreen() {
       lng: primed.longitude,
       address: pickupAddress || 'Localização Actual',
     };
-  }, [params.originLat, params.originLng, params.originAddress, pickupFromStore, pickupAddress]);
+  }, [params.originLat, params.originLng, params.originAddress, tripDraft, pickupFromStore, pickupAddress]);
 
   useEffect(() => {
     const isPlaceholder = (a: string) =>
       !a || a === 'A obter localização…' || a === 'A obter localização...' || /^-?\d+\.\d+,\s*-?\d+\.\d+$/.test(a);
 
-    const currentAddr = toText(params.originAddress) || pickupFromStore?.address || '';
+    const draft = getTripDraft();
+    const paramAddr = toText(params.originAddress);
+    const draftOrStoreAddr = draft?.pickup.address || pickupFromStore?.address || '';
+    const currentAddr = paramAddr || draftOrStoreAddr;
+
+    if (draft || paramAddr) {
+      if (!isPlaceholder(currentAddr)) {
+        setPickupAddress(currentAddr);
+      }
+      return;
+    }
+
     if (!isPlaceholder(currentAddr)) {
       setPickupAddress(currentAddr);
       return;
@@ -232,7 +253,7 @@ export default function MapScreen() {
       .catch(() => {
         setPickupAddress(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
       });
-  }, [params.originLat, params.originLng]);
+  }, [params.originLat, params.originLng, params.originAddress, pickupFromStore?.address]);
 
   const destination: SelectedDestination = useMemo(() => {
     const lat = toNumber(params.destLat);
@@ -244,6 +265,8 @@ export default function MapScreen() {
       return { lat, lng, address, place_name: name || address };
     }
 
+    if (tripDraft) return tripDraft.destination;
+
     if (destinationFromStore) return destinationFromStore;
 
     return {
@@ -254,25 +277,72 @@ export default function MapScreen() {
     };
   }, [
     params.destLat, params.destLng, params.destAddress, params.destName,
-    destinationFromStore, pickup.lat, pickup.lng,
+    tripDraft, destinationFromStore, pickup.lat, pickup.lng,
   ]);
+
+  useEffect(() => {
+    if (!isCategoryRetry) return;
+    const draft = getTripDraft();
+    if (!draft) return;
+
+    assertDraftRestoration(draft, pickup, destination);
+
+    logCategoryRetry('restored pickup', {
+      lat: pickup.lat,
+      lng: pickup.lng,
+      address: pickup.address,
+    });
+    logCategoryRetry('restored destination', {
+      lat: destination.lat,
+      lng: destination.lng,
+      address: destination.address,
+    });
+    if (draft.estimatedDistanceKm > 0) {
+      logCategoryRetry('restored distance', { km: draft.estimatedDistanceKm });
+    }
+    if (draft.estimatedDurationMin > 0) {
+      logCategoryRetry('restored duration', { min: draft.estimatedDurationMin });
+    }
+    if (draft.routeCoordinates?.length) {
+      logCategoryRetry('restored route polyline', { points: draft.routeCoordinates.length });
+    }
+  }, [isCategoryRetry, pickup.lat, pickup.lng, pickup.address, destination.lat, destination.lng, destination.address]);
 
   /* ── Rota: linha recta já na 1.ª frame; Directions só depois (não bloqueia o mapa) ── */
   useEffect(() => {
     let cancelled = false;
     let rafId: number | null = null;
 
+    const draft = getTripDraft();
+    const draftMatchesTrip =
+      draft != null &&
+      Math.abs(draft.pickup.lat - pickup.lat) < 0.0001 &&
+      Math.abs(draft.pickup.lng - pickup.lng) < 0.0001 &&
+      Math.abs(draft.destination.lat - destination.lat) < 0.0001 &&
+      Math.abs(draft.destination.lng - destination.lng) < 0.0001;
+
     const fallback = [
       { latitude: pickup.lat, longitude: pickup.lng },
       { latitude: destination.lat, longitude: destination.lng },
     ];
 
-    setRouteCoordinates(fallback);
+    if (draftMatchesTrip && draft.routeCoordinates && draft.routeCoordinates.length >= 2) {
+      setRouteCoordinates(draft.routeCoordinates);
+    } else {
+      setRouteCoordinates(fallback);
+    }
     setPolylineKey((k) => k + 1);
 
-    const distKm = haversineKm(pickup.lat, pickup.lng, destination.lat, destination.lng);
-    const durMin = Math.max(2, Math.round((distKm / 28) * 60));
-    setRouteDistance({ distanceKm: distKm, durationMin: durMin });
+    if (draftMatchesTrip && draft.estimatedDistanceKm > 0) {
+      setRouteDistance({
+        distanceKm: draft.estimatedDistanceKm,
+        durationMin: draft.estimatedDurationMin,
+      });
+    } else {
+      const distKm = haversineKm(pickup.lat, pickup.lng, destination.lat, destination.lng);
+      const durMin = Math.max(2, Math.round((distKm / 28) * 60));
+      setRouteDistance({ distanceKm: distKm, durationMin: durMin });
+    }
 
     const task = InteractionManager.runAfterInteractions(() => {
       if (cancelled) return;
@@ -293,7 +363,7 @@ export default function MapScreen() {
               setRouteDistance({ distanceKm: result.distanceKm, durationMin: result.durationMin });
             }
           })
-          .catch(() => { /* haversine fallback already set */ });
+          .catch(() => { /* haversine/draft fallback already set */ });
       });
     });
 
@@ -598,6 +668,17 @@ export default function MapScreen() {
             if (!selectedCategory) return;
             setIsRequesting(true);
             try {
+              saveTripDraft(
+                buildTripDraft({
+                  pickup,
+                  destination,
+                  estimatedDistanceKm: routeDistance.distanceKm,
+                  estimatedDurationMin: routeDistance.durationMin,
+                  routeCoordinates,
+                  selectedCategorySlug: selectedCategory.slug,
+                }),
+              );
+
               const result = await rideService.requestRideV2({
                 p_pickup_lat: pickup.lat,
                 p_pickup_lng: pickup.lng,

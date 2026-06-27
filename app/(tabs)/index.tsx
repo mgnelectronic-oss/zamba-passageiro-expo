@@ -10,18 +10,19 @@ import {
   UIManager,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import * as Location from 'expo-location';
+import { useFocusEffect } from '@react-navigation/native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Feather from '@expo/vector-icons/Feather';
 import { authService, type UserProfile } from '@/services/authService';
 import type { SavedAddress, RecentDestination } from '@/services/addressService';
-import { reverseGeocode } from '@/services/googleGeocoding';
 import DrawerMenu from '@/components/DrawerMenu';
+import { ActiveRideBanner } from '@/components/ActiveRideBanner';
 import { AppBannersSection } from '@/components/AppBannersSection';
 import { useAppBootstrap } from '@/contexts/AppBootstrapContext';
-import { mapCacheService } from '@/services/cache/mapCacheService';
-import { primeMapCenter } from '@/services/mapLocationMemory';
+import { usePassengerLocation } from '@/hooks/usePassengerLocation';
+import { usePassengerActiveRide } from '@/hooks/usePassengerActiveRide';
+import { buildTripDraft, saveTripDraft } from '@/services/searchFlowStore';
 
 /* ── palette ── */
 const C = {
@@ -93,78 +94,55 @@ export default function HomeScreen() {
     initialSavedAddresses,
     initialRecentDestinations,
   } = useAppBootstrap();
+  const {
+    currentLocation,
+    currentAddress,
+    isLoadingLocation,
+    locationError,
+    refreshLocation: refreshPassengerLocation,
+  } = usePassengerLocation();
+  const { refreshActiveRide } = usePassengerActiveRide();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [appError, setAppError] = useState<string | null>(null);
+  const [locationErrorDismissed, setLocationErrorDismissed] = useState(false);
+  const [useDefaultPickup, setUseDefaultPickup] = useState(false);
   const [profile, setProfile] = useState<UserProfile | null>(() => initialProfile);
   const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>(() => initialSavedAddresses);
   const [recentDestinations, setRecentDestinations] = useState<RecentDestination[]>(
     () => initialRecentDestinations,
   );
   const [recentsExpanded, setRecentsExpanded] = useState(false);
-  const [pickup, setPickup] = useState({
-    lat: -25.9692,
-    lng: 32.5732,
-    address: 'A obter localização…',
-  });
 
-  useEffect(() => {
-    let mounted = true;
-
-    void mapCacheService.getLastKnownLocation().then((last) => {
-      if (!mounted || !last) return;
-      primeMapCenter(last.lat, last.lng);
-      setPickup({ lat: last.lat, lng: last.lng, address: last.address });
-    });
-
-    (async () => {
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') {
-          if (mounted) {
-            setPickup((p) => ({ ...p, address: 'Maputo (localização padrão)' }));
-            setAppError('Permissão de localização negada.');
-          }
-        } else {
-          const pos = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced,
-          });
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          if (mounted) {
-            primeMapCenter(lat, lng);
-            setPickup({ lat, lng, address: `${lat.toFixed(4)}, ${lng.toFixed(4)}` });
-          }
-
-          reverseGeocode(lat, lng)
-            .then((addr) => {
-              if (mounted) {
-                setPickup((p) => ({ ...p, address: addr }));
-                void mapCacheService.setLastKnownLocation(lat, lng, addr);
-              }
-            })
-            .catch(() => {
-              if (mounted) {
-                setPickup((p) => {
-                  const nextAddr = p.address.includes(',') ? p.address : 'Localização Actual';
-                  void mapCacheService.setLastKnownLocation(lat, lng, nextAddr);
-                  return { ...p, address: nextAddr };
-                });
-              }
-            });
-        }
-      } catch {
-        if (mounted) {
-          setPickup((p) => ({ ...p, address: 'Maputo (localização padrão)' }));
-        }
-      }
-    })();
-
-    return () => { mounted = false; };
-  }, []);
+  /** Origem/pickup vem sempre da fonte única de localização do passageiro. */
+  const pickup = useMemo(() => {
+    if (!useDefaultPickup && currentLocation) {
+      return {
+        lat: currentLocation.latitude,
+        lng: currentLocation.longitude,
+        address:
+          currentAddress ??
+          `${currentLocation.latitude.toFixed(4)}, ${currentLocation.longitude.toFixed(4)}`,
+      };
+    }
+    return {
+      lat: -25.9692,
+      lng: 32.5732,
+      address: useDefaultPickup
+        ? 'Maputo (padrão)'
+        : isLoadingLocation
+          ? 'A obter localização…'
+          : 'Maputo (localização padrão)',
+    };
+  }, [useDefaultPickup, currentLocation, currentAddress, isLoadingLocation]);
 
   useEffect(() => {
     setProfile(initialProfile);
   }, [initialProfile]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshActiveRide();
+    }, [refreshActiveRide]),
+  );
 
   useEffect(() => {
     if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -176,7 +154,7 @@ export default function HomeScreen() {
     if (recentDestinations.length <= 1) setRecentsExpanded(false);
   }, [recentDestinations.length]);
 
-  const lastError = appError;
+  const lastError = !locationErrorDismissed ? locationError : null;
 
   const greeting = useMemo(() => {
     const h = new Date().getHours();
@@ -194,28 +172,29 @@ export default function HomeScreen() {
   );
 
   const refreshLocation = useCallback(() => {
-    setAppError(null);
-    setPickup((p) => ({ ...p, address: 'A obter localização…' }));
-    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
-      .then((pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        setPickup({ lat, lng, address: `${lat.toFixed(4)}, ${lng.toFixed(4)}` });
-        reverseGeocode(lat, lng)
-          .then((addr) => {
-            setPickup((p) => ({ ...p, address: addr }));
-            void mapCacheService.setLastKnownLocation(lat, lng, addr);
-          })
-          .catch(() => {});
-      })
-      .catch(() => {
-        setAppError('Não foi possível obter a localização.');
-        setPickup((p) => ({ ...p, address: 'Maputo (localização padrão)' }));
-      });
-  }, []);
+    setLocationErrorDismissed(false);
+    setUseDefaultPickup(false);
+    void refreshPassengerLocation();
+  }, [refreshPassengerLocation]);
 
   const navigateToMap = useCallback(
     (destLat: number, destLng: number, destAddress: string, destName: string) => {
+      saveTripDraft(
+        buildTripDraft({
+          pickup: {
+            lat: pickup.lat,
+            lng: pickup.lng,
+            address: pickup.address,
+          },
+          destination: {
+            lat: destLat,
+            lng: destLng,
+            address: destAddress,
+            place_name: destName,
+          },
+        }),
+      );
+
       router.push({
         pathname: '/map' as any,
         params: {
@@ -311,6 +290,8 @@ export default function HomeScreen() {
         </View>
 
         <View style={st.body}>
+          <ActiveRideBanner />
+
           {/* ── Error banner ── */}
           {lastError ? (
             <View style={st.errorBanner}>
@@ -325,15 +306,15 @@ export default function HomeScreen() {
                       <Text style={st.errorAction}>Tentar novamente</Text>
                     </TouchableOpacity>
                   )}
-                  <TouchableOpacity onPress={() => setAppError(null)} hitSlop={8}>
+                  <TouchableOpacity onPress={() => setLocationErrorDismissed(true)} hitSlop={8}>
                     <Text style={st.errorAction}>Fechar</Text>
                   </TouchableOpacity>
                   {typeof lastError === 'string' && lastError.includes('localização') && (
                     <TouchableOpacity
                       hitSlop={8}
                       onPress={() => {
-                        setAppError(null);
-                        setPickup((p) => ({ ...p, lat: -25.9692, lng: 32.5732, address: 'Maputo (padrão)' }));
+                        setLocationErrorDismissed(true);
+                        setUseDefaultPickup(true);
                       }}
                     >
                       <Text style={[st.errorAction, { color: C.textMuted }]}>Usar padrão</Text>
@@ -491,7 +472,15 @@ export default function HomeScreen() {
         user={ctxUser}
         profile={profile}
         router={router}
-        onLogout={() => authService.signOut().catch(() => {})}
+        onLogout={async () => {
+          try {
+            await authService.signOut();
+          } catch {
+            // continuar para o login
+          } finally {
+            router.replace('/auth');
+          }
+        }}
       />
 
     </SafeAreaView>

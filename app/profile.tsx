@@ -16,6 +16,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import Feather from '@expo/vector-icons/Feather';
 import { authService, type UserProfile } from '@/services/authService';
 import { CachedRemoteImage } from '@/components/CachedRemoteImage';
+import { ConfirmModal } from '@/components/ConfirmModal';
 
 const C = {
   bg: '#F7F8FA',
@@ -51,6 +52,7 @@ export default function ProfileScreen() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [logoutModal, setLogoutModal] = useState(false);
 
   const loadProfile = useCallback(async () => {
     const u = await authService.getCurrentUser();
@@ -110,8 +112,15 @@ export default function ProfileScreen() {
     setError(null);
   };
 
-  const handleLogout = async () => {
-    await authService.signOut();
+  const runLogout = async () => {
+    try {
+      await authService.signOut();
+    } catch {
+      // sessão local pode já ter sido limpa
+    } finally {
+      setLogoutModal(false);
+      router.replace('/auth');
+    }
   };
 
   if (loading) {
@@ -271,7 +280,11 @@ export default function ProfileScreen() {
                   </TouchableOpacity>
                 </View>
               ) : (
-                <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout} activeOpacity={0.85}>
+                <TouchableOpacity
+                  style={styles.logoutBtn}
+                  onPress={() => setLogoutModal(true)}
+                  activeOpacity={0.85}
+                >
                   <Feather name="log-out" size={18} color={C.red} />
                   <Text style={styles.logoutText}>SAIR DA CONTA</Text>
                 </TouchableOpacity>
@@ -280,6 +293,14 @@ export default function ProfileScreen() {
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+      <ConfirmModal
+        visible={logoutModal}
+        onClose={() => setLogoutModal(false)}
+        onConfirm={runLogout}
+        title="Tens certeza que queres sair?"
+        confirmLabel="Sair"
+        cancelLabel="Cancelar"
+      />
     </SafeAreaView>
   );
 }

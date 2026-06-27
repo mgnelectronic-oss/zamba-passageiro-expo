@@ -7,6 +7,8 @@ const IMPLEMENTED = new Set([
   '/verification',
   '/saved-addresses',
   '/history',
+  '/support',
+  '/about',
 ]);
 
 /**

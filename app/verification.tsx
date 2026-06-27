@@ -17,7 +17,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import Feather from '@expo/vector-icons/Feather';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
-import { authService, type UserProfile } from '@/services/authService';
+import { authService, formatErrorMessage, type UserProfile } from '@/services/authService';
 import { rideService } from '@/services/rideService';
 
 type DocumentType = 'BI' | 'Passaporte';
@@ -180,7 +180,7 @@ export default function VerificationPage() {
       setStep(6);
     } catch (e) {
       console.error('Verification submit error:', e);
-      setErrorMsg('Erro ao enviar verificação. Tente novamente.');
+      setErrorMsg(formatErrorMessage(e));
     } finally {
       setSubmitting(false);
     }
@@ -443,7 +443,12 @@ export default function VerificationPage() {
             </View>
 
             <View style={st.btnRow}>
-              <TouchableOpacity style={st.ghostBtn} onPress={() => setStep(4)} disabled={submitting} activeOpacity={0.8}>
+              <TouchableOpacity
+                style={[st.ghostBtn, submitting && st.disabledBtn]}
+                onPress={() => setStep(4)}
+                disabled={submitting}
+                activeOpacity={0.8}
+              >
                 <Text style={st.ghostBtnText}>Voltar</Text>
               </TouchableOpacity>
               <TouchableOpacity

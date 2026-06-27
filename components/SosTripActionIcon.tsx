@@ -2,9 +2,9 @@ import React, { useEffect, useRef } from 'react';
 import { Animated, Easing, Platform, StyleSheet, View } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 
-const CIRCLE = 48;
-/** Escala máxima das ondas para caber no slot sem clip (layout fixo 84×72). */
-const RING_SCALE_MAX = 1.62;
+const CIRCLE = 42;
+/** Escala máxima das ondas para caber no slot sem clip (layout fixo 68×54). */
+const RING_SCALE_MAX = 1.55;
 
 /** Uma onda concêntrica que expande e desvanece (efeito radar), sem alterar layout. */
 function RadarRing({ delayMs }: { delayMs: number }) {
@@ -59,7 +59,7 @@ export function SosTripActionIcon() {
       <RadarRing delayMs={0} />
       <RadarRing delayMs={1000} />
       <View style={styles.circle}>
-        <Ionicons name="shield-checkmark" size={26} color="#FFF" />
+        <Ionicons name="shield-checkmark" size={22} color="#FFF" />
       </View>
     </View>
   );
@@ -67,8 +67,8 @@ export function SosTripActionIcon() {
 
 const styles = StyleSheet.create({
   wrap: {
-    width: 84,
-    height: 72,
+    width: 68,
+    height: 54,
     alignItems: 'center',
     justifyContent: 'center',
     alignSelf: 'center',

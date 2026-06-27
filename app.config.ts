@@ -7,6 +7,18 @@ const ANDROID_PACKAGE = 'com.zamba.passageiro';
 const GOOGLE_SERVICES_REL = './google-services.json';
 const GOOGLE_SERVICES_ABS = path.join(process.cwd(), GOOGLE_SERVICES_REL);
 
+const APP_ICON = './assets/images/icon.png';
+const APP_SPLASH_IMAGE = './assets/images/splash.png';
+
+const ICON_ABS = path.join(process.cwd(), 'assets', 'images', 'icon.png');
+const SPLASH_ABS = path.join(process.cwd(), 'assets', 'images', 'splash.png');
+if (!fs.existsSync(ICON_ABS)) {
+  console.error(`[app.config] ENOENT: icon não encontrado em ${ICON_ABS} (config: ${APP_ICON})`);
+}
+if (!fs.existsSync(SPLASH_ABS)) {
+  console.error(`[app.config] ENOENT: splash não encontrado em ${SPLASH_ABS} (config: ${APP_SPLASH_IMAGE})`);
+}
+
 /**
  * Em `npx expo prebuild` / EAS Build, confirma que o Expo vai embutir o mesmo ficheiro
  * referido em `android.googleServicesFile` (raiz do projeto = ao lado de app.config.ts).
@@ -88,6 +100,18 @@ function logGoogleServicesForAndroidBuild(): void {
 logGoogleServicesForAndroidBuild();
 
 const GOOGLE_MAPS_KEY = (process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY ?? '').trim();
+const MAPBOX_ACCESS_TOKEN = (process.env.EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN ?? '').trim();
+
+if (MAPBOX_ACCESS_TOKEN) {
+  console.log(
+    `[app.config] EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN: definida (comprimento ${MAPBOX_ACCESS_TOKEN.length}).`,
+  );
+} else {
+  console.warn(
+    '[app.config] AVISO: EXPO_PUBLIC_MAPBOX_ACCESS_TOKEN ausente. ' +
+      'O mapa profissional Mapbox na viagem ativa usará fallback Google Maps.',
+  );
+}
 
 const isEasBuild = process.env.EAS_BUILD === 'true';
 
@@ -117,10 +141,26 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ? (inheritedExtra as { eas: Record<string, unknown> }).eas
       : {};
 
+  const basePlugins = config.plugins ?? [];
+  const hasMapboxPlugin = basePlugins.some(
+    (p) => p === '@rnmapbox/maps' || (Array.isArray(p) && p[0] === '@rnmapbox/maps'),
+  );
+  const pluginsWithMapbox = hasMapboxPlugin ? basePlugins : [...basePlugins, '@rnmapbox/maps'];
+
   return {
     ...config,
     name: config.name ?? 'zamba-passageiro',
     slug: config.slug ?? 'zamba-passageiro',
+    icon: './assets/images/icon.png',
+    splash: {
+      image: './assets/images/splash.png',
+      resizeMode: 'contain',
+      backgroundColor: '#ffffff',
+    },
+    web: {
+      ...config.web,
+      favicon: APP_ICON,
+    },
     extra: {
       ...inheritedExtra,
       eas: {
@@ -128,9 +168,23 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         projectId: '36d622ec-38d4-45c6-99b5-4a1c3eb6d983',
       },
     },
-    plugins: [...(config.plugins ?? []), 'expo-notifications'],
+    plugins: [
+      ...pluginsWithMapbox,
+      [
+        'expo-build-properties',
+        {
+          ios: { deploymentTarget: '15.1' },
+        },
+      ],
+      'expo-notifications',
+    ],
     ios: {
       ...config.ios,
+      infoPlist: {
+        ...config.ios?.infoPlist,
+        NSMicrophoneUsageDescription:
+          'O Zamba precisa do microfone para chamadas de voz com o motorista.',
+      },
       config: {
         ...config.ios?.config,
         ...(GOOGLE_MAPS_KEY ? { googleMapsApiKey: GOOGLE_MAPS_KEY } : {}),
@@ -139,7 +193,18 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     android: {
       ...config.android,
       package: ANDROID_PACKAGE,
+      permissions: [
+        ...new Set([
+          ...(config.android?.permissions ?? []),
+          'android.permission.RECORD_AUDIO',
+          'android.permission.MODIFY_AUDIO_SETTINGS',
+        ]),
+      ],
       googleServicesFile: GOOGLE_SERVICES_REL,
+      adaptiveIcon: {
+        foregroundImage: APP_ICON,
+        backgroundColor: '#ffffff',
+      },
       config: {
         ...config.android?.config,
         googleMaps: {

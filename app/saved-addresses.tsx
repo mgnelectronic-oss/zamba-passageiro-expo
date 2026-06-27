@@ -14,7 +14,6 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
-import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import Feather from '@expo/vector-icons/Feather';
@@ -22,6 +21,7 @@ import { authService } from '@/services/authService';
 import { addressService, type SavedAddress } from '@/services/addressService';
 import { searchPredictions, resolvePredictionToDestination, type PlacePrediction } from '@/services/googlePlaces';
 import { reverseGeocode } from '@/services/googleGeocoding';
+import { usePassengerLocation } from '@/hooks/usePassengerLocation';
 
 const ICON_OPTIONS: { id: string; icon: keyof typeof Ionicons.glyphMap; label: string; color: string }[] = [
   { id: 'home',     icon: 'home',        label: 'Casa',          color: '#3B82F6' },
@@ -58,6 +58,7 @@ function resolveIcon(name: string): keyof typeof Ionicons.glyphMap {
 export default function SavedAddressesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { currentLocation, getFreshPosition } = usePassengerLocation();
   const mapRef = useRef<MapView>(null);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -205,10 +206,12 @@ export default function SavedAddressesScreen() {
     if (lat && lng) {
       setMarkerCoord({ latitude: lat, longitude: lng });
     } else {
-      try {
-        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        setMarkerCoord({ latitude: pos.coords.latitude, longitude: pos.coords.longitude });
-      } catch {
+      const pos = await getFreshPosition();
+      if (pos) {
+        setMarkerCoord({ latitude: pos.latitude, longitude: pos.longitude });
+      } else if (currentLocation) {
+        setMarkerCoord({ latitude: currentLocation.latitude, longitude: currentLocation.longitude });
+      } else {
         setMarkerCoord(MAPUTO);
       }
     }
@@ -226,12 +229,11 @@ export default function SavedAddressesScreen() {
   };
 
   const handleRecenterMap = async () => {
-    try {
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const coord = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
-      setMarkerCoord(coord);
-      mapRef.current?.animateToRegion({ ...coord, latitudeDelta: 0.002, longitudeDelta: 0.002 }, 500);
-    } catch { /* silent */ }
+    const pos = await getFreshPosition();
+    if (!pos) return;
+    const coord = { latitude: pos.latitude, longitude: pos.longitude };
+    setMarkerCoord(coord);
+    mapRef.current?.animateToRegion({ ...coord, latitudeDelta: 0.002, longitudeDelta: 0.002 }, 500);
   };
 
   const handleSearchChange = (text: string) => {

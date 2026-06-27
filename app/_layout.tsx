@@ -1,14 +1,22 @@
-import { useCallback, useEffect, useRef } from 'react';
-import { AppState, View, StyleSheet } from 'react-native';
+import 'react-native-gesture-handler';
+import { useEffect, useRef, useState } from 'react';
+import { View, StyleSheet } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 import { AppBootstrapProvider, useAppBootstrap } from '@/contexts/AppBootstrapContext';
+import { PassengerLocationProvider, usePassengerLocation } from '@/contexts/PassengerLocationContext';
+import { PassengerActiveRideProvider } from '@/contexts/PassengerActiveRideContext';
 import { BootScreen } from '@/components/BootScreen';
+import { NoInternetScreen } from '@/components/NoInternetScreen';
+import { LocationRequiredScreen } from '@/components/LocationRequiredScreen';
 import { usePushNotifications } from '@/hooks/usePushNotifications';
-import { rideService } from '@/services/rideService';
+import { useNetworkStatus } from '@/hooks/useNetworkStatus';
 import { MapEnginePreloader } from '@/components/MapEnginePreloader';
+import { PassengerIncomingCallHost } from '@/components/PassengerIncomingCallHost';
+import { usePassengerAppRestore } from '@/hooks/usePassengerAppRestore';
 
 export const unstable_settings = {
   anchor: '(tabs)',
@@ -16,38 +24,39 @@ export const unstable_settings = {
 
 function RootNavigation() {
   const { sessionReady, user, isHomeDataReady } = useAppBootstrap();
+  const {
+    locationPermissionStatus,
+    hasLocation,
+    isLoadingLocation,
+    locationError,
+    refreshLocation,
+  } = usePassengerLocation();
   const segments = useSegments();
   const router = useRouter();
-  const segmentsRef = useRef(segments);
-  segmentsRef.current = segments;
-  const lastActiveRideResolveAt = useRef(0);
+  const locationBootstrapDoneRef = useRef(false);
+  const [locationBootstrapDone, setLocationBootstrapDone] = useState(false);
 
   const canNavigate = sessionReady && isHomeDataReady;
 
-  usePushNotifications(user?.id, sessionReady, canNavigate && !!user);
-
-  /** Mesma regra que Zamba-Mocambique `PassengerProvider.initializeUserData`: última corrida + estado RPC. */
-  const redirectToActiveRideIfNeeded = useCallback(
-    async (opts?: { bypassThrottle?: boolean }) => {
-      if (!user?.id || !canNavigate) return;
-      const top = segmentsRef.current[0];
-      if (top === 'currentRide' || top === 'searchingDriver') return;
-      if (top && top !== '(tabs)') return;
-
-      const now = Date.now();
-      if (!opts?.bypassThrottle && now - lastActiveRideResolveAt.current < 1800) return;
-      lastActiveRideResolveAt.current = now;
-
-      try {
-        const rideId = await rideService.resolveActivePassengerRideId(user.id);
-        if (!rideId) return;
-        router.replace({ pathname: '/currentRide', params: { rideId } });
-      } catch (e) {
-        console.warn('[navigation] resolveActivePassengerRideId', e);
+  useEffect(() => {
+    if (user && hasLocation && locationPermissionStatus === 'granted') {
+      if (!locationBootstrapDoneRef.current) {
+        locationBootstrapDoneRef.current = true;
+        setLocationBootstrapDone(true);
       }
-    },
-    [user?.id, canNavigate, router],
-  );
+    }
+    if (!user) {
+      locationBootstrapDoneRef.current = false;
+      setLocationBootstrapDone(false);
+    }
+  }, [user, hasLocation, locationPermissionStatus]);
+
+  usePassengerAppRestore({
+    enabled: canNavigate && !!user,
+    locationBootstrapDone: !user || locationBootstrapDone,
+  });
+
+  usePushNotifications(user?.id, sessionReady, canNavigate && !!user);
 
   useEffect(() => {
     if (!canNavigate) return;
@@ -61,20 +70,6 @@ function RootNavigation() {
     }
   }, [canNavigate, user, segments, router]);
 
-  useEffect(() => {
-    if (!user?.id || !canNavigate) return;
-    void redirectToActiveRideIfNeeded();
-  }, [user?.id, canNavigate, segments, redirectToActiveRideIfNeeded]);
-
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (next) => {
-      if (next === 'active' && user?.id) {
-        void redirectToActiveRideIfNeeded({ bypassThrottle: true });
-      }
-    });
-    return () => sub.remove();
-  }, [user?.id, redirectToActiveRideIfNeeded]);
-
   if (!sessionReady) {
     return <View style={styles.sessionProbe} />;
   }
@@ -83,43 +78,102 @@ function RootNavigation() {
     return <BootScreen />;
   }
 
+  // Gate de localização só no arranque inicial — não desmonta a app ao voltar do background.
+  if (user && !locationBootstrapDone) {
+    if (locationPermissionStatus === 'denied' || locationPermissionStatus === 'blocked') {
+      return (
+        <LocationRequiredScreen
+          variant="permission"
+          permissionBlocked={locationPermissionStatus === 'blocked'}
+          onRetry={() => void refreshLocation()}
+          isRetrying={isLoadingLocation}
+        />
+      );
+    }
+    if (!hasLocation) {
+      if (isLoadingLocation || locationPermissionStatus === 'undetermined') {
+        return <BootScreen />;
+      }
+      if (locationError) {
+        return (
+          <LocationRequiredScreen
+            variant="gps"
+            onRetry={() => void refreshLocation()}
+            isRetrying={isLoadingLocation}
+          />
+        );
+      }
+    }
+  }
+
   return (
     <>
       {user && isHomeDataReady ? <MapEnginePreloader /> : null}
-      <Stack>
-        <Stack.Screen name="auth" options={{ headerShown: false }} />
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="search" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="map" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="searchingDriver" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="ride/[id]" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="currentRide" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="ride-active" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="history" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="profile" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="saved-addresses" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="verification" options={{ headerShown: false, animation: 'slide_from_right' }} />
-        <Stack.Screen name="shared-rides" options={{ headerShown: false, animation: 'slide_from_right' }} />
+      {user?.id ? <PassengerIncomingCallHost userId={user.id} /> : null}
+      <Stack
+        screenOptions={{
+          headerShown: false,
+        }}
+      >
+        <Stack.Screen name="auth" />
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="search" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="map" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="searchingDriver" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="ride/[id]" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="currentRide" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="ride-call" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="ride-active" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="history" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="profile" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="saved-addresses" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="verification" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="shared-rides" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="support" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="about" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
       </Stack>
-      <StatusBar style="dark" />
+      <StatusBar style="dark" translucent={false} />
     </>
   );
 }
 
 const styles = StyleSheet.create({
+  ghRoot: {
+    flex: 1,
+  },
   sessionProbe: {
     flex: 1,
     backgroundColor: '#F7F8FA',
   },
 });
 
+function AppShell() {
+  const { isOffline, hasResolvedInitial, refresh, isRefreshing } = useNetworkStatus();
+
+  if (!hasResolvedInitial) {
+    return <View style={styles.sessionProbe} />;
+  }
+
+  if (isOffline) {
+    return <NoInternetScreen onRetry={refresh} isRetrying={isRefreshing} />;
+  }
+
+  return <RootNavigation />;
+}
+
 export default function RootLayout() {
   return (
-    <AppBootstrapProvider>
-      <SafeAreaProvider>
-        <RootNavigation />
-      </SafeAreaProvider>
-    </AppBootstrapProvider>
+    <GestureHandlerRootView style={styles.ghRoot}>
+      <AppBootstrapProvider>
+        <PassengerActiveRideProvider>
+          <PassengerLocationProvider>
+            <SafeAreaProvider>
+              <AppShell />
+            </SafeAreaProvider>
+          </PassengerLocationProvider>
+        </PassengerActiveRideProvider>
+      </AppBootstrapProvider>
+    </GestureHandlerRootView>
   );
 }

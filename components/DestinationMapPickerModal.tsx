@@ -9,14 +9,17 @@ import {
   Platform,
   Animated,
   Easing,
+  Alert,
+  Linking,
 } from 'react-native';
 import MapView, { PROVIDER_GOOGLE } from 'react-native-maps';
-import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { ANDROID_MAPVIEW_TILE_PROPS } from '@/lib/mapViewAndroid';
 import { reverseGeocode } from '@/services/googleGeocoding';
 import { mapCacheService } from '@/services/cache/mapCacheService';
+import { usePassengerLocation } from '@/hooks/usePassengerLocation';
+import { MapCurrentLocationButton } from '@/components/map/MapCurrentLocationButton';
 import type { SelectedDestination } from '@/services/googlePlaces';
 
 /** Mapa nativo Android: SDK usa `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` (ver `app.config.ts`). */
@@ -63,6 +66,8 @@ type Props = {
   initialLat: number;
   initialLng: number;
   onPick: (destination: SelectedDestination) => void;
+  /** Texto do botão de confirmação (padrão: destino; reutilizável para recolha). */
+  confirmLabel?: string;
 };
 
 const C = {
@@ -155,8 +160,14 @@ export function DestinationMapPickerModal({
   initialLat,
   initialLng,
   onPick,
+  confirmLabel = 'Confirmar destino',
 }: Props) {
   const insets = useSafeAreaInsets();
+  const {
+    currentLocation,
+    getFreshPosition,
+    locationPermissionStatus,
+  } = usePassengerLocation();
 
   const mapRef = useRef<MapView | null>(null);
   const mapReadyRef = useRef(false);
@@ -168,6 +179,8 @@ export function DestinationMapPickerModal({
   const openedAtRef = useRef(0);
   const programmaticMoveRef = useRef(false);
   const panActiveRef = useRef(false);
+  /** Incrementado só ao abrir o modal — evita remontar MapView durante movimentos/GPS. */
+  const [mapSessionKey, setMapSessionKey] = useState(0);
 
   const chromeOpacity = useRef(new Animated.Value(1)).current;
   const chromeTranslate = useRef(new Animated.Value(0)).current;
@@ -183,12 +196,19 @@ export function DestinationMapPickerModal({
   const [centerLat, setCenterLat] = useState(safeInitial.lat);
   const [centerLng, setCenterLng] = useState(safeInitial.lng);
   const [confirming, setConfirming] = useState(false);
+  const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
+  const [centeringLocation, setCenteringLocation] = useState(false);
+  const centeringInFlightRef = useRef(false);
   const [bootCenter, setBootCenter] = useState(() => ({
     lat: safeInitial.lat,
     lng: safeInitial.lng,
   }));
 
   bootCenterRef.current = bootCenter;
+
+  const toggleMapType = useCallback(() => {
+    setMapType((current) => (current === 'standard' ? 'satellite' : 'standard'));
+  }, []);
 
   const showChrome = useCallback(() => {
     Animated.parallel([
@@ -240,6 +260,7 @@ export function DestinationMapPickerModal({
 
   useEffect(() => {
     if (!visible) return;
+
     sessionIdRef.current += 1;
     const session = sessionIdRef.current;
     gpsAnimatedRef.current = false;
@@ -251,9 +272,11 @@ export function DestinationMapPickerModal({
     chromeOpacity.setValue(1);
     chromeTranslate.setValue(0);
     setConfirming(false);
+    setMapType('standard');
     setCenterLat(safeInitial.lat);
     setCenterLng(safeInitial.lng);
     setBootCenter({ lat: safeInitial.lat, lng: safeInitial.lng });
+    setMapSessionKey((k) => k + 1);
 
     let cancelled = false;
 
@@ -265,12 +288,17 @@ export function DestinationMapPickerModal({
       setBootCenter({ lat: last.lat, lng: last.lng });
       setCenterLat(last.lat);
       setCenterLng(last.lng);
+      if (mapReadyRef.current) {
+        mapRef.current?.animateToRegion(regionFromCenter(last.lat, last.lng), 0);
+      }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [visible, safeInitial.lat, safeInitial.lng, chromeOpacity, chromeTranslate]);
+    // Apenas ao abrir — não resetar mapType quando coords/props mudam com modal aberto.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
 
   const initialRegion = useMemo(
     () => regionFromCenter(bootCenter.lat, bootCenter.lng),
@@ -285,6 +313,83 @@ export function DestinationMapPickerModal({
     [runProgrammaticWindow],
   );
 
+  const centerOnLocationRef = useRef<() => void>(() => {});
+
+  const showLocationErrorAlert = useCallback(
+    (kind: 'permission' | 'unavailable') => {
+      if (kind === 'permission') {
+        const blocked = locationPermissionStatus === 'blocked';
+        Alert.alert(
+          'Permissão de localização necessária',
+          'O Zamba precisa da sua localização para definir o ponto no mapa.',
+          blocked
+            ? [
+                { text: 'Cancelar', style: 'cancel' },
+                { text: 'Abrir definições', onPress: () => void Linking.openSettings() },
+              ]
+            : [{ text: 'OK' }],
+        );
+        return;
+      }
+      Alert.alert(
+        'Localização indisponível',
+        'Não foi possível obter a sua localização atual. Verifique se o GPS está ligado e tente novamente.',
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          { text: 'Tentar novamente', onPress: () => centerOnLocationRef.current() },
+        ],
+      );
+    },
+    [locationPermissionStatus],
+  );
+
+  const centerMapOnCoords = useCallback(
+    (lat: number, lng: number) => {
+      setCenterLat(lat);
+      setCenterLng(lng);
+      gpsResolvedRef.current = true;
+      showChrome();
+      applyUrbanRegion(lat, lng, 520);
+    },
+    [applyUrbanRegion, showChrome],
+  );
+
+  const handleCenterOnCurrentLocation = useCallback(async () => {
+    if (centeringInFlightRef.current) return;
+
+    if (
+      locationPermissionStatus === 'denied' ||
+      locationPermissionStatus === 'blocked'
+    ) {
+      showLocationErrorAlert('permission');
+      return;
+    }
+
+    centeringInFlightRef.current = true;
+    setCenteringLocation(true);
+    try {
+      const pos = (await getFreshPosition()) ?? currentLocation;
+      if (!pos) {
+        showLocationErrorAlert('unavailable');
+        return;
+      }
+      centerMapOnCoords(pos.latitude, pos.longitude);
+    } finally {
+      centeringInFlightRef.current = false;
+      setCenteringLocation(false);
+    }
+  }, [
+    currentLocation,
+    getFreshPosition,
+    locationPermissionStatus,
+    showLocationErrorAlert,
+    centerMapOnCoords,
+  ]);
+
+  centerOnLocationRef.current = () => {
+    void handleCenterOnCurrentLocation();
+  };
+
   useEffect(() => {
     if (!visible) return;
     const session = sessionIdRef.current;
@@ -292,19 +397,13 @@ export function DestinationMapPickerModal({
 
     (async () => {
       try {
-        const { status } = await Location.getForegroundPermissionsAsync();
-        if (status !== 'granted') {
-          const ask = await Location.requestForegroundPermissionsAsync();
-          if (ask.status !== 'granted') return;
-        }
-        const pos = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
+        const pos = await getFreshPosition();
+        if (!pos) return;
         if (cancelled || session !== sessionIdRef.current) return;
 
         gpsResolvedRef.current = true;
 
-        const { latitude: lat, longitude: lng } = pos.coords;
+        const { latitude: lat, longitude: lng } = pos;
         const bc = bootCenterRef.current;
         const d = distanceMeters(bc.lat, bc.lng, lat, lng);
 
@@ -336,7 +435,9 @@ export function DestinationMapPickerModal({
     return () => {
       cancelled = true;
     };
-  }, [visible, safeInitial.lat, safeInitial.lng, applyUrbanRegion]);
+    // Apenas ao abrir — atualizações de pickup/GPS no pai não devem refazer esta busca.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
 
   const onRegionChange = useCallback(() => {
     if (programmaticMoveRef.current) return;
@@ -378,8 +479,6 @@ export function DestinationMapPickerModal({
     }
   }, [centerLat, centerLng, onPick]);
 
-  const mapMountKey = `${bootCenter.lat.toFixed(5)}_${bootCenter.lng.toFixed(5)}`;
-
   return (
     <Modal
       visible={visible}
@@ -390,11 +489,11 @@ export function DestinationMapPickerModal({
       <View style={styles.root}>
         <MapView
           ref={mapRef}
-          key={mapMountKey}
+          key={`map-picker-${mapSessionKey}`}
           style={StyleSheet.absoluteFill}
           provider={PROVIDER_GOOGLE}
           initialRegion={initialRegion}
-          mapType="standard"
+          mapType={mapType}
           mapPadding={{
             top: insets.top + 64,
             right: 14,
@@ -450,6 +549,34 @@ export function DestinationMapPickerModal({
 
           <CenterScreenPin />
 
+          <View
+            style={[
+              styles.mapFabColumn,
+              { bottom: Math.max(insets.bottom, 14) + GOOGLE_ATTRIBUTION_STRIP + 148 },
+            ]}
+          >
+            <MapCurrentLocationButton
+              onPress={() => void handleCenterOnCurrentLocation()}
+              loading={centeringLocation}
+            />
+            <TouchableOpacity
+              style={styles.mapTypeFab}
+              onPress={toggleMapType}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel="Alternar tipo de mapa"
+            >
+              <Ionicons
+                name={mapType === 'standard' ? 'layers-outline' : 'map-outline'}
+                size={18}
+                color={C.text}
+              />
+              <Text style={styles.mapTypeFabText}>
+                {mapType === 'standard' ? 'Satélite' : 'Normal'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
           <Animated.View
             style={[
               styles.bottomAnchor,
@@ -478,7 +605,7 @@ export function DestinationMapPickerModal({
                 {confirming ? (
                   <ActivityIndicator color="#FFFFFF" />
                 ) : (
-                  <Text style={styles.confirmText}>Confirmar destino</Text>
+                  <Text style={styles.confirmText}>{confirmLabel}</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -563,6 +690,40 @@ const styles = StyleSheet.create({
     color: C.text,
     letterSpacing: -0.35,
     textAlign: 'center',
+  },
+  mapFabColumn: {
+    position: 'absolute',
+    right: 20,
+    zIndex: 12,
+    alignItems: 'center',
+    gap: 10,
+  },
+  mapTypeFab: {
+    minWidth: 52,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(15,23,42,0.08)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#0F172A',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.14,
+        shadowRadius: 8,
+      },
+      android: { elevation: 5 },
+    }),
+  },
+  mapTypeFabText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: -0.1,
   },
   bottomAnchor: {
     position: 'absolute',

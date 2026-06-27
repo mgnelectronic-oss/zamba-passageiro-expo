@@ -60,13 +60,17 @@ export function useRideState(rideId: string | undefined) {
 
   useEffect(() => {
     if (!rideId) return;
-    const unsub = rideService.subscribeToRide(rideId, () => {
-      if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);
-      realtimeDebounceRef.current = setTimeout(() => {
-        realtimeDebounceRef.current = null;
-        poll();
-      }, 220);
-    });
+    const unsub = rideService.subscribeToRide(
+      rideId,
+      () => {
+        if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);
+        realtimeDebounceRef.current = setTimeout(() => {
+          realtimeDebounceRef.current = null;
+          poll();
+        }, 220);
+      },
+      { scope: 'ride-screen' },
+    );
     return () => {
       unsub();
       if (realtimeDebounceRef.current) clearTimeout(realtimeDebounceRef.current);

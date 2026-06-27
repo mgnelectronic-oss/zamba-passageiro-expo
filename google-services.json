@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "245108721340",
+    "project_id": "zamba-passageiro",
+    "storage_bucket": "zamba-passageiro.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:245108721340:android:0f33dbae04178a2f8972b9",
+        "android_client_info": {
+          "package_name": "com.zamba.passageiro"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB4KGZVJOrylkCCtmtUrraZEYYeM6EMqts"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

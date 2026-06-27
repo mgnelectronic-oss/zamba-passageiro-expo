@@ -13,11 +13,11 @@ import {
   Linking,
   KeyboardAvoidingView,
 } from 'react-native';
-import * as Location from 'expo-location';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '@/lib/supabase';
 import { rideService } from '@/services/rideService';
+import { usePassengerLocation } from '@/hooks/usePassengerLocation';
 
 const FONT_BODY = Platform.select({
   ios: undefined,
@@ -77,6 +77,7 @@ export function EmergencySosModal({
   rideId: string;
 }) {
   const insets = useSafeAreaInsets();
+  const { getFreshPosition } = usePassengerLocation();
 
   const [sosStep, setSosStep] = useState<SosStep>('main');
   const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([]);
@@ -105,14 +106,9 @@ export function EmergencySosModal({
     if (!activeSosAlertId || !visible) return;
     const tick = async () => {
       try {
-        const pos = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-        await rideService.updateSosAlertLocation(
-          activeSosAlertId,
-          pos.coords.latitude,
-          pos.coords.longitude,
-        );
+        const pos = await getFreshPosition();
+        if (!pos) return;
+        await rideService.updateSosAlertLocation(activeSosAlertId, pos.latitude, pos.longitude);
       } catch (err) {
         console.error('[sos] error updating location:', err);
       }
@@ -122,7 +118,7 @@ export function EmergencySosModal({
       void tick();
     }, 7000);
     return () => clearInterval(id);
-  }, [activeSosAlertId, visible]);
+  }, [activeSosAlertId, visible, getFreshPosition]);
 
   const handleFetchEmergencyContacts = useCallback(async () => {
     setSosStep('emergency_contacts');
@@ -185,19 +181,13 @@ export function EmergencySosModal({
     let lat: number;
     let lng: number;
     try {
-      const { status } = await Location.getForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        const ask = await Location.requestForegroundPermissionsAsync();
-        if (ask.status !== 'granted') {
-          setSosError('Não foi possível obter a sua localização.');
-          return;
-        }
+      const pos = await getFreshPosition();
+      if (!pos) {
+        setSosError('Não foi possível obter a sua localização.');
+        return;
       }
-      const pos = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-      lat = pos.coords.latitude;
-      lng = pos.coords.longitude;
+      lat = pos.latitude;
+      lng = pos.longitude;
     } catch {
       setSosError('Não foi possível obter a sua localização.');
       return;
@@ -244,7 +234,7 @@ export function EmergencySosModal({
     } finally {
       setIsSendingSos(false);
     }
-  }, [activeSosAlertId, rideId, selectedSosReason, sosDetails]);
+  }, [activeSosAlertId, rideId, selectedSosReason, sosDetails, getFreshPosition]);
 
   const goBack = () => setSosStep('main');
 

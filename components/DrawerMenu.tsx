@@ -15,6 +15,7 @@ import { DrawerMenuHeader } from '@/components/drawer/DrawerMenuHeader';
 import { DrawerMenuItem, DrawerMenuLogoutItem } from '@/components/drawer/DrawerMenuItem';
 import { DRAWER_MENU_ITEMS } from '@/components/drawer/drawerMenuConfig';
 import { pushDrawerRoute } from '@/components/drawer/pushDrawerRoute';
+import { ConfirmModal } from '@/components/ConfirmModal';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 /** `w-[80vw] max-w-[320px]` em PassengerSideMenu (web) */
@@ -25,7 +26,7 @@ interface DrawerMenuProps {
   onClose: () => void;
   user: { email?: string | null } | null;
   profile: UserProfile | null;
-  onLogout: () => void;
+  onLogout: () => void | Promise<void>;
   /** Router Expo (mesmas rotas que `router.push` no web). */
   router: { push: (href: string) => void };
 }
@@ -46,6 +47,7 @@ export default function DrawerMenu({
   const translateX = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
   const [mounted, setMounted] = useState(false);
+  const [logoutConfirm, setLogoutConfirm] = useState(false);
 
   useLayoutEffect(() => {
     if (visible) setMounted(true);
@@ -95,16 +97,34 @@ export default function DrawerMenu({
     pushDrawerRoute(router, nativePath);
   };
 
-  const handleLogout = () => {
-    onClose();
-    onLogout();
+  const openLogoutModal = () => {
+    setLogoutConfirm(true);
+  };
+
+  const handleConfirmLogout = async () => {
+    try {
+      await onLogout();
+    } catch {
+      // ignorar: auth pode já ter desligado
+    } finally {
+      setLogoutConfirm(false);
+      onClose();
+    }
   };
 
   if (!visible && !mounted) return null;
 
   return (
-    <Modal visible transparent animationType="none" onRequestClose={onClose}>
-      <View style={styles.root}>
+    <Modal
+      visible
+      transparent
+      animationType="none"
+      onRequestClose={() => {
+        if (logoutConfirm) setLogoutConfirm(false);
+        else onClose();
+      }}
+    >
+      <View style={styles.root} collapsable={false}>
         <Pressable style={styles.backdropPress} onPress={onClose}>
           <Animated.View
             pointerEvents="none"
@@ -139,10 +159,19 @@ export default function DrawerMenu({
                   onPress={() => handleItemPress(item.nativePath)}
                 />
               ))}
-              <DrawerMenuLogoutItem onPress={handleLogout} />
+              <DrawerMenuLogoutItem onPress={openLogoutModal} />
             </View>
           </ScrollView>
         </Animated.View>
+        <ConfirmModal
+          mode="inline"
+          visible={logoutConfirm}
+          onClose={() => setLogoutConfirm(false)}
+          onConfirm={handleConfirmLogout}
+          title="Tens certeza que queres sair?"
+          confirmLabel="Sair"
+          cancelLabel="Cancelar"
+        />
       </View>
     </Modal>
   );
